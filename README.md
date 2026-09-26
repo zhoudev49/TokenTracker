@@ -283,6 +283,6 @@ npm test    # 提交前请确保全绿
 
 <sub>如果这个项目对你有用，欢迎点个 ⭐️</sub>
 
-<sub>🌏 中国大陆用户可访问 <a href="https://gitee.com/<your-name>/TokenTracker">Gitee 镜像</a></sub>
+<sub>🌏 中国大陆用户可访问 <a href="https://gitee.com/<your-name>/TokenTracker">Gitee 地址</a></sub>
 
 </div>
