@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n-title="page.settings">TokenTracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><h1>TokenTracker</h1><p data-i18n="brand.tagline">多平台 AI 编码用量分析</p></div></div>
+      <div class="topbar-actions">
+        <button id="langSwitch" class="lang-switch" type="button" aria-label="切换语言"></button>
+        <div class="connection" aria-live="polite"><span id="connectionDot" class="connection-dot"></span><span id="connectionText" data-i18n="status.connecting">正在连接</span></div>
+      </div>
+    </header>
+    <nav id="navRoot"></nav>
+
+    <main>
+      <div id="statusBanner" class="status-banner" role="status" hidden></div>
+      <section class="panel settings-page">
+        <div class="panel-header"><h2 data-i18n="settings.title">设置</h2><span class="panel-meta" data-i18n="settings.meta">仅保存在本机浏览器</span></div>
+        <form id="settingsForm" class="settings-form">
+          <div class="settings-general">
+            <div class="filter-field"><label for="refreshInterval" data-i18n="settings.refreshInterval">页面刷新间隔（秒）</label><input id="refreshInterval" type="number" min="5" max="3600" step="1" required /></div>
+          </div>
+          <p class="settings-note" data-i18n="settings.note">本工具只统计 token 用量与会话详情，不涉及任何价格或费用信息。设置保存在浏览器本地，不会上传。</p>
+          <div class="dialog-actions"><a class="button secondary" href="index.html" data-i18n="settings.cancel">取消</a><button class="button primary" type="submit" data-i18n="settings.save">保存并返回</button></div>
+        </form>
+      </section>
+    </main>
+
+    <script src="/i18n.js"></script>
+    <script src="/common.js"></script>
+    <script src="/settings.js"></script>
+  </body>
+</html>

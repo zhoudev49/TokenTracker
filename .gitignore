@@ -1,0 +1,38 @@
+# ── 依赖 ──
+node_modules
+
+# ── 本地数据（含真实 token 用量与日志路径，切勿提交）──
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# ── 日志 ──
+server.log
+*.log
+
+# ── 本地临时/调试文件 ──
+inspect_tmp.cjs
+push_before.md
+
+# ── GUI 测试截图（含真实项目名与用量数据，切勿提交）──
+gui-test-screenshots/
+
+# ── TypeScript 编译产物 ──
+dist/
+*.tsbuildinfo
+
+# ── 前端 TS 编译产物（源码为 public/*.ts，npm start 自动构建）──
+public/*.js
+
+# ── 项目本地工具数据（记忆/技能缓存等）──
+.workbuddy/
+.zcode/
+.dsh-project-memory/
+
+# ── 编辑器 / 操作系统 ──
+.vscode/
+.idea/
+.DS_Store
+*.swp
+Thumbs.db

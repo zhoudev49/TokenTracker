@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n-title="page.overview">TokenTracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/vendor/flatpickr/flatpickr.min.css" />
+  <link rel="stylesheet" href="/vendor/tom-select/tom-select.min.css" />
+  <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><h1>TokenTracker</h1><p data-i18n="brand.tagline">多平台 AI 编码用量分析</p></div></div>
+      <div class="topbar-actions">
+        <button id="langSwitch" class="lang-switch" type="button" aria-label="切换语言"></button>
+        <div class="connection" aria-live="polite"><span id="connectionDot" class="connection-dot"></span><span id="connectionText" data-i18n="status.connecting">正在连接</span></div>
+      </div>
+    </header>
+    <nav id="navRoot"></nav>
+
+    <main>
+      <div id="filterBarRoot"></div>
+      <div id="statusBanner" class="status-banner" role="status" hidden></div>
+
+      <section class="overview" aria-label="使用概览">
+        <article class="metric-card"><p class="metric-label" data-i18n="metric.totalTokens">筛选范围 Token</p><p id="totalTokens" class="metric-value">--</p></article>
+        <article class="metric-card"><p class="metric-label" data-i18n="metric.input">输入 Token</p><p id="inputTokens" class="metric-value">--</p></article>
+        <article class="metric-card"><p class="metric-label" data-i18n="metric.output">输出 Token</p><p id="outputTokens" class="metric-value">--</p></article>
+        <article class="metric-card"><p class="metric-label" data-i18n="metric.sessions">会话数</p><p id="sessionCount" class="metric-value">--</p></article>
+      </section>
+
+      <section class="cache-strip" aria-label="缓存分析">
+        <div><span data-i18n="cache.efficiency">缓存读取率</span><strong id="cacheEfficiency">--</strong></div>
+        <div><span data-i18n="cache.read">缓存读取</span><strong id="cacheReadTokens">--</strong></div>
+        <div><span data-i18n="cache.written">缓存创建</span><strong id="cacheCreationTokens">--</strong></div>
+        <div><span data-i18n="cache.total">缓存 Token 合计</span><strong id="cacheTotalTokens">--</strong></div>
+      </section>
+
+      <section class="charts" aria-label="Token 图表">
+        <article class="panel"><div class="panel-header"><h2 data-i18n="chart.trend">最近 30 天趋势</h2></div><div class="chart-body"><canvas id="trendChart"></canvas></div></article>
+        <article class="panel"><div class="panel-header"><h2 data-i18n="chart.modelShare">模型消耗占比</h2></div><div class="chart-body"><canvas id="modelChart"></canvas></div></article>
+      </section>
+
+      <section class="panel project-panel">
+        <div class="panel-header"><h2 data-i18n="projects.title">项目用量</h2><span id="projectMeta" class="panel-meta">0 个项目</span></div>
+        <div class="table-scroll"><table class="project-table"><thead><tr><th data-i18n="projects.column.project">项目</th><th class="number" data-i18n="projects.column.sessions">会话</th><th data-i18n="projects.column.model">主要模型</th><th class="number" data-i18n="sessions.column.input">输入</th><th class="number" data-i18n="sessions.column.output">输出</th><th class="number" data-i18n="projects.column.total">总 Token</th><th class="number" data-i18n="projects.column.efficiency">缓存读取率</th></tr></thead><tbody id="projectTableBody"><tr class="empty-row"><td colspan="7" data-i18n="sessions.loading">正在加载</td></tr></tbody></table></div>
+      </section>
+    </main>
+
+    <script src="/vendor/chart.js/chart.umd.min.js"></script>
+    <script src="/vendor/flatpickr/flatpickr.min.js"></script>
+    <script src="/vendor/tom-select/tom-select.complete.min.js"></script>
+    <script src="/i18n.js"></script>
+    <script src="/common.js"></script>
+    <script src="/overview.js"></script>
+  </body>
+</html>

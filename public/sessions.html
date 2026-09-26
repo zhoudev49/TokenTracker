@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n-title="page.sessions">TokenTracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/vendor/flatpickr/flatpickr.min.css" />
+  <link rel="stylesheet" href="/vendor/tom-select/tom-select.min.css" />
+  <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><h1>TokenTracker</h1><p data-i18n="brand.tagline">多平台 AI 编码用量分析</p></div></div>
+      <div class="topbar-actions">
+        <button id="langSwitch" class="lang-switch" type="button" aria-label="切换语言"></button>
+        <div class="connection" aria-live="polite"><span id="connectionDot" class="connection-dot"></span><span id="connectionText" data-i18n="status.connecting">正在连接</span></div>
+      </div>
+    </header>
+    <nav id="navRoot"></nav>
+
+    <main>
+      <div id="filterBarRoot"></div>
+      <div id="statusBanner" class="status-banner" role="status" hidden></div>
+
+      <section class="panel table-panel">
+        <div class="panel-header session-header">
+          <div><h2 data-i18n="sessions.title">会话列表</h2><span id="tableMeta" class="panel-meta">0 条记录</span></div>
+          <div class="session-tools">
+            <input id="sessionSearch" class="search-input" type="search" placeholder="搜索会话、项目或模型" aria-label="搜索会话" data-i18n-placeholder="sessions.searchPlaceholder" />
+            <select id="pageSize" class="compact-select" aria-label="每页数量"><option value="20" data-i18n="sessions.perPage20">20 / 页</option><option value="50" selected data-i18n="sessions.perPage50">50 / 页</option><option value="100" data-i18n="sessions.perPage100">100 / 页</option></select>
+            <select id="exportFormat" class="compact-select" aria-label="导出格式"><option value="csv">CSV</option><option value="json">JSON</option></select>
+            <button id="exportButton" class="button secondary" type="button" data-i18n="sessions.export">导出</button>
+          </div>
+        </div>
+        <div class="table-scroll"><table><thead><tr><th data-i18n="sessions.column.sessionId">会话 ID</th><th data-i18n="sessions.column.project">项目</th><th><button class="sort-button" data-sort="timestamp" type="button"><span data-i18n="sessions.column.lastActivity">最后活动</span> <span data-arrow="timestamp">↓</span></button></th><th data-i18n="sessions.column.model">模型</th><th class="number" data-i18n="sessions.column.input">输入</th><th class="number" data-i18n="sessions.column.output">输出</th><th class="number" data-i18n="sessions.column.cacheRead">缓存读取</th><th class="number" data-i18n="sessions.column.cacheWrite">缓存创建</th><th class="number"><button class="sort-button" data-sort="totalTokens" type="button"><span data-i18n="sessions.column.total">总 Token</span> <span data-arrow="totalTokens"></span></button></th><th data-i18n="sessions.column.platform">平台</th></tr></thead><tbody id="sessionTableBody"><tr class="empty-row"><td colspan="10" data-i18n="sessions.loading">正在加载</td></tr></tbody></table></div>
+        <footer class="pagination session-pager"><button id="firstPage" class="button secondary" type="button" data-i18n="sessions.first">首页</button><button id="previousPage" class="button secondary" type="button" data-i18n="sessions.prev">上一页</button><span id="pageMeta">第 1 / 1 页</span><button id="nextPage" class="button secondary" type="button" data-i18n="sessions.next">下一页</button><button id="lastPage" class="button secondary" type="button" data-i18n="sessions.last">尾页</button><span class="pager-jump"><input id="jumpInput" class="pager-jump-input" type="number" min="1" placeholder="页" data-i18n-placeholder="sessions.pagePlaceholder" /><button id="jumpBtn" class="button secondary" type="button" data-i18n="sessions.jump">跳转</button></span></footer>
+      </section>
+    </main>
+
+    <script src="/vendor/flatpickr/flatpickr.min.js"></script>
+    <script src="/vendor/tom-select/tom-select.complete.min.js"></script>
+    <script src="/i18n.js"></script>
+    <script src="/common.js"></script>
+    <script src="/sessions.js"></script>
+  </body>
+</html>
