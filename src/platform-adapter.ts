@@ -43,7 +43,13 @@ export interface ParseOptions {
 
 /** 增量解析器：逐行喂入，最后 finish 出结果（仅 incremental 模式使用）。 */
 export interface IncrementalParser {
-  addLine(line: string): void;
+  /**
+   * 喂入一行。
+   * `lineOffset` 是该行在文件中的起始字节偏移。解析器在记录本身没有任何 id 字段时
+   * 用它生成稳定的兜底事件 id —— 增量续读每次都新建解析器，用「本实例第几行」
+   * 会在不同批次间碰撞，导致后一次同步覆盖前一次的行。
+   */
+  addLine(line: string, lineOffset?: number): void;
   finish(): ParsedPlatformLog;
 }
 

@@ -14,6 +14,7 @@ server.log
 # ── 本地临时/调试文件 ──
 inspect_tmp.cjs
 push_before.md
+PUSH-GUIDE.md
 
 # ── GUI 测试截图（含真实项目名与用量数据，切勿提交）──
 gui-test-screenshots/
@@ -36,3 +37,4 @@ public/*.js
 .DS_Store
 *.swp
 Thumbs.db
+CODE-REVIEW.md

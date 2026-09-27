@@ -179,7 +179,9 @@ function extractText(content: unknown): string {
 }
 
 function createUsageRecordParser(logFile: LogFileInfo): {
-  addLine(line: string): void;
+  // 与 IncrementalParser 契约保持一致：lineOffset 供实现方生成稳定兜底 id。
+  // Claude 自身的解析器要求 message.id 存在（缺 id 直接跳过），因此这里不消费该参数。
+  addLine(line: string, lineOffset?: number): void;
   finish(): ParsedLog;
 } {
   const eventsByKey = new Map<string, UsageEvent>();

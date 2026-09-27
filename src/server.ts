@@ -19,8 +19,10 @@ import {
   getSortClause,
   getFilterOptions,
   getImportedLogFiles,
+  importedLogKey,
   markLogFileImported,
   deleteUsageEventsForFile,
+  withTransaction,
   getUsageEventCount,
   getImportDiagnostics,
   migrateSourcePathsToRelative,
@@ -153,9 +155,21 @@ async function listClaudeLogFiles(): Promise<ClaudeLogFileInfo[]> {
   return claudeAdapter.listFiles();
 }
 
-async function readCompleteLines(filePath: string, startOffset: number, fileSize: number, onLine: (line: string) => void): Promise<number> {
+/**
+ * 逐行读取 [startOffset, fileSize) 区间内**以换行结束**的完整行。
+ *
+ * 返回值里的 `nextOffset` 只推进到最后一个换行之后，因此末尾未终结的半行会留在
+ * 区间之外、下次同步重读；`trailingFragment` 把这段残留原文一并交出，
+ * 供调用方判断它是否已经是一条完整记录（见 importPlatformFile 的处理）。
+ */
+async function readCompleteLines(
+  filePath: string,
+  startOffset: number,
+  fileSize: number,
+  onLine: (line: string, lineOffset: number) => void,
+): Promise<{ nextOffset: number; trailingFragment: string | null }> {
   if (fileSize <= startOffset) {
-    return startOffset;
+    return { nextOffset: startOffset, trailingFragment: null };
   }
 
   const handle = await fs.promises.open(filePath, "r");
@@ -165,6 +179,8 @@ async function readCompleteLines(filePath: string, startOffset: number, fileSize
     let pendingLineLength = 0;
     let position = startOffset;
     let nextOffset = startOffset;
+    // 当前累积中的这一行在文件里的起始字节偏移：跨同步稳定，可作为兜底事件 id。
+    let pendingLineStart = startOffset;
 
     while (position < fileSize) {
       const length = Math.min(buffer.length, fileSize - position);
@@ -186,11 +202,12 @@ async function readCompleteLines(filePath: string, startOffset: number, fileSize
           : pendingLineParts.length === 1
             ? pendingLineParts[0].toString("utf8")
             : Buffer.concat(pendingLineParts, pendingLineLength).toString("utf8");
-        onLine(line);
+        onLine(line, pendingLineStart);
         pendingLineParts.length = 0;
         pendingLineLength = 0;
         segmentStart = index + 1;
         nextOffset = position + index + 1;
+        pendingLineStart = nextOffset;
       }
 
       if (segmentStart < bytesRead) {
@@ -201,7 +218,13 @@ async function readCompleteLines(filePath: string, startOffset: number, fileSize
       position += bytesRead;
     }
 
-    return nextOffset;
+    const trailingFragment = pendingLineLength === 0
+      ? null
+      : (pendingLineParts.length === 1
+        ? pendingLineParts[0].toString("utf8")
+        : Buffer.concat(pendingLineParts, pendingLineLength).toString("utf8"));
+
+    return { nextOffset, trailingFragment };
   } finally {
     await handle.close();
   }
@@ -209,7 +232,7 @@ async function readCompleteLines(filePath: string, startOffset: number, fileSize
 
 async function readCompleteChunk(filePath: string, startOffset: number, fileSize: number): Promise<{ content: string; nextOffset: number }> {
   const lines: string[] = [];
-  const nextOffset = await readCompleteLines(filePath, startOffset, fileSize, (line) => {
+  const { nextOffset } = await readCompleteLines(filePath, startOffset, fileSize, (line) => {
     lines.push(line);
   });
   return {
@@ -231,21 +254,42 @@ async function importPlatformFile(
 ): Promise<{ importedEvents: number; duplicateRecords: number; invalidLines: number }> {
   const storedPath = file.storedPath || file.filePath;
   const incremental = adapter.mode === "incremental" && typeof adapter.createIncrementalParser === "function";
+  // 本函数会直接开事务写库，必须先确保连接就绪：
+  // withTransaction 走的是 run()，在 initializeDatabase 之前调用会拿到空连接。
+  await initializeDatabase();
 
   if (!incremental) {
     const parsed = await adapter.parseFile(file);
     if (!parsed) {
       throw new Error(`Unable to read ${adapter.label} source file: ${storedPath}`);
     }
+    // 解析结果为空时绝不能先删后插：源库表缺失/损坏/被锁时读取器会「成功返回空数组」，
+    // 删除会清掉此前导入的全部事件，而文件随即被标记 ready，再也不重试 —— 历史数据被不可逆销毁。
+    // 用 previousState 判定「这个文件此前确实导入过」：只有确实导入过才允许空结果落地。
+    const previouslyImported = Boolean(
+      previousState &&
+      previousState.status !== "error" &&
+      (previousState.byteOffset > 0 || previousState.fileSize > 0),
+    );
+    if (parsed.events.length === 0 && previouslyImported) {
+      throw new Error(
+        `${adapter.label} source file yielded no events but was previously imported; ` +
+        `refusing to drop existing rows for ${storedPath} (the source may be unreadable or reset).`,
+      );
+    }
     // 整份重建：先清掉该文件此前写入的事件，避免编号变化后留下孤儿行。
-    await deleteUsageEventsForFile(storedPath);
-    await processImportedChunk(parsed.session, parsed.events);
-    await markLogFileImported(storedPath, {
-      modifiedTimeMs: file.modifiedTimeMs,
-      fileSize: file.fileSize,
-      byteOffset: file.fileSize,
-      status: "ready",
-      platform: adapter.id,
+    // 删除 + 写入 + 标记状态合为一个事务，否则并发同步的另一个平台事务回滚时
+    // 会把这里的删除一并撤销，留下永远清不掉的孤儿行（重复计数）。
+    await withTransaction(async () => {
+      await deleteUsageEventsForFile(storedPath, adapter.id);
+      await processImportedChunk(parsed.session, parsed.events);
+      await markLogFileImported(storedPath, {
+        modifiedTimeMs: file.modifiedTimeMs,
+        fileSize: file.fileSize,
+        byteOffset: file.fileSize,
+        status: "ready",
+        platform: adapter.id,
+      });
     });
     return {
       importedEvents: parsed.events.length,
@@ -258,31 +302,55 @@ async function importPlatformFile(
   let startOffset = previous ? previous.byteOffset : 0;
   const requiresRebuild =
     !previous ||
-    previous.fileSize === 0 ||
     file.fileSize < previous.byteOffset ||
     // 大小不变但 mtime 变了 —— 内容被原地改写，追加式续读会漏掉改动。
     (file.fileSize === previous.fileSize && file.modifiedTimeMs !== previous.modifiedTimeMs);
 
   if (requiresRebuild) {
     startOffset = 0;
-    await deleteUsageEventsForFile(storedPath);
   }
 
   const parser = adapter.createIncrementalParser!(file);
-  const nextOffset = await readCompleteLines(
+  const read = await readCompleteLines(
     file.filePath,
     startOffset,
     file.fileSize,
-    (line) => parser.addLine(line),
+    (line, lineOffset) => parser.addLine(line, lineOffset),
   );
+
+  // 文件末尾最后一行可能没有换行符（进程在写完最后一条记录前退出、日志被截断等）。
+  // 只按 '\n' 推进偏移会把这条完整记录永久丢弃，而且文件每次同步都会被重新解析。
+  // 若该残留片段本身是合法 JSON，说明它是完整记录，应当就地消费；否则保留偏移，
+  // 等下次同步它补全后再读 —— 半个 JSON 对象不能被当成一条记录。
+  let nextOffset = read.nextOffset;
+  if (read.trailingFragment) {
+    let complete = false;
+    try {
+      JSON.parse(read.trailingFragment);
+      complete = true;
+    } catch {
+      complete = false;
+    }
+    if (complete) {
+      parser.addLine(read.trailingFragment, read.nextOffset);
+      nextOffset = file.fileSize;
+    }
+  }
   const parsed = parser.finish();
-  await processImportedChunk(parsed.session, parsed.events);
-  await markLogFileImported(storedPath, {
-    modifiedTimeMs: file.modifiedTimeMs,
-    fileSize: file.fileSize,
-    byteOffset: nextOffset,
-    status: "ready",
-    platform: adapter.id,
+  // 删除 + 写入 + 标记状态合为一个事务：否则并发同步的另一个平台事务回滚时
+  // 会把这里的删除一并撤销，留下永远清不掉的孤儿行（重复计数）。
+  await withTransaction(async () => {
+    if (requiresRebuild) {
+      await deleteUsageEventsForFile(storedPath, adapter.id);
+    }
+    await processImportedChunk(parsed.session, parsed.events);
+    await markLogFileImported(storedPath, {
+      modifiedTimeMs: file.modifiedTimeMs,
+      fileSize: file.fileSize,
+      byteOffset: nextOffset,
+      status: "ready",
+      platform: adapter.id,
+    });
   });
 
   return {
@@ -360,8 +428,11 @@ async function syncPlatform(platformId: string): Promise<SyncState> {
       const forceInitialRebuild = existingEventCount === 0;
 
       for (const file of files) {
+        // imported_logs 以 (platform, 相对路径) 为键：不同平台的相对路径会同名，
+        // 只按路径查会把上一个平台的同步状态错当成这个平台的。
         const previousState =
-          importedLogFiles.get(file.storedPath) || importedLogFiles.get(file.filePath);
+          importedLogFiles.get(importedLogKey(adapter.id, file.storedPath)) ||
+          importedLogFiles.get(importedLogKey(adapter.id, file.filePath));
         const unchanged =
           !forceInitialRebuild &&
           previousState &&

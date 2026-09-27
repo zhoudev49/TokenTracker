@@ -224,6 +224,11 @@ export function createClaudeJsonlParser(
   let invalidLines = 0;
   let usageRecords = 0;
   let skippedZeroRecords = 0;
+  // 绝对行号：从文件开头累计，与是否带 usage 无关。
+  // 兜底 messageId 必须用它而不是 usageRecords —— usageRecords 是「本实例内第几条用量」，
+  // 增量同步每次新建解析器都从 1 重来，会导致不同批次的第 1 条算出同一个 event_key，
+  // 后一次同步把前一次的行覆盖掉（静默丢 token）。
+  let linesSeen = 0;
   let lastUserBlocks: unknown = null;
   let pendingAssistant: Segment[] = [];
   let lastAssistantText = "";
@@ -235,7 +240,8 @@ export function createClaudeJsonlParser(
     pendingAssistant.push({ kind: "text", text });
   }
 
-  function addLine(line: string): void {
+  function addLine(line: string, lineOffset?: number): void {
+    linesSeen += 1;
     if (!line.trim()) return;
 
     let parsed: unknown;
@@ -300,9 +306,16 @@ export function createClaudeJsonlParser(
     if (!usage) return;
     usageRecords += 1;
 
+    // 兜底 id：优先用记录自带的各种 id；都没有时退化为「该行在文件中的起始字节偏移」。
+    // 不能用数组下标/计数：增量同步每次都新建解析器，计数会从头重来，
+    // 导致不同批次的记录算出同一个 event_key 而互相覆盖（静默丢 token）。
+    // 字节偏移在多次同步之间稳定、且同一行重读时幂等，正好满足 upsert 语义。
+    const fallbackId = lineOffset === null || lineOffset === undefined
+      ? `line-${linesSeen}`
+      : `offset-${lineOffset}`;
     const messageId = pickString(message, ["id"])
       || pickString(record, ["id", "uuid", "messageId", "message_id"])
-      || `line-${usageRecords}`;
+      || fallbackId;
 
     // 原文分段先于「零 token 跳过」收集：Claude 的 <synthetic> 等零用量记录
     // 不产生事件，但会话详情页仍应能展开它的正文。
@@ -363,6 +376,13 @@ export function parseClaudeJsonlFile(
   options: ClaudeJsonlParseOptions = {},
 ): ParsedPlatformLog {
   const parser = createClaudeJsonlParser(file, platformId, options);
-  for (const line of content.split(/\r?\n/)) parser.addLine(line);
+  // 整份解析也要给出每行的字节偏移，才能与增量解析算出同一套兜底 id ——
+  // 否则同一个文件在「整份重建」与「增量续读」两条路径下会得到不同的 event_key，
+  // 同一行被存成两行（重复计数）。这里的偏移按 UTF-8 字节计，与增量侧一致。
+  let offset = 0;
+  for (const line of content.split(/\r?\n/)) {
+    parser.addLine(line, offset);
+    offset += Buffer.byteLength(line, "utf8") + 1; // +1 为被 split 掉的 '\n'
+  }
   return parser.finish();
 }

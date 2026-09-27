@@ -236,3 +236,51 @@ test("增量平台提供流式解析器，重建平台不提供", () => {
   assert.equal(getAdapter("codex")!.mode, "rebuild");
   assert.equal(getAdapter("opencode")!.mode, "rebuild");
 });
+
+// ---------------------------------------------------------------------------
+// 回归：无 id 记录在增量续读之间不得碰撞
+// ---------------------------------------------------------------------------
+
+test("无 id 记录的兜底事件 id 在多次增量解析之间保持稳定且互不相同", () => {
+  // 回归：兜底 id 曾是 `line-${usageRecords}`，而 usageRecords 是「本实例第几条用量」，
+  // 增量同步每次新建解析器都从 1 重来 —— 于是不同批次的第 1 条算出同一个 event_key，
+  // 被 ON CONFLICT DO UPDATE 覆盖，N 次同步后只剩 1 行（静默丢 token）。
+  // 现在兜底 id 用行在文件中的字节偏移，跨批次稳定且唯一。
+  const recordWithoutId = (tokens: number): string => JSON.stringify({
+    type: "assistant",
+    sessionId: "session-no-id",
+    timestamp: "2026-09-01T00:00:00Z",
+    message: { role: "assistant", usage: { input_tokens: tokens, output_tokens: 0, total_tokens: tokens } },
+  });
+
+  const file = {
+    filePath: "/tmp/no-id.jsonl",
+    storedPath: "project-no-id/no-id.jsonl",
+    projectName: "project-no-id",
+    sessionId: "session-no-id",
+    modifiedTimeMs: 1,
+    fileSize: 1,
+  };
+
+  // 模拟两次增量同步：各自新建解析器，各自从偏移起点继续喂入新行
+  const firstBatch = createClaudeJsonlParser(file, "workbuddy");
+  firstBatch.addLine(recordWithoutId(100), 0);
+  firstBatch.addLine(recordWithoutId(200), 174);
+  const firstResult = firstBatch.finish();
+
+  const secondBatch = createClaudeJsonlParser(file, "workbuddy");
+  secondBatch.addLine(recordWithoutId(300), 348);
+  const secondResult = secondBatch.finish();
+
+  const firstKeys = firstResult.events.map((event) => event.eventKey);
+  const secondKeys = secondResult.events.map((event) => event.eventKey);
+
+  assert.equal(firstKeys.length, 2);
+  assert.equal(secondKeys.length, 1);
+  assert.equal(
+    firstKeys.some((key) => secondKeys.includes(key)),
+    false,
+    "不同批次的事件 key 不得碰撞，否则后一次同步会覆盖前一次的行",
+  );
+  assert.ok(secondKeys[0].includes("offset-348"), `兜底 id 应用字节偏移，实际为 ${secondKeys[0]}`);
+});

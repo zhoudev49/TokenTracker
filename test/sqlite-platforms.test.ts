@@ -23,6 +23,7 @@ const {
   getSessionSourceFiles,
   markLogFileImported,
   getImportedLogFiles,
+  importedLogKey,
   migrateSourcePathsToRelative,
   closeDatabase,
 } = require("../src/database") as typeof import("../src/database");
@@ -199,9 +200,10 @@ test("路径迁移：只改写位于该根目录下的绝对路径，域外路�
   await migrateSourcePathsToRelative(claudeRoot);
 
   const imported = await getImportedLogFiles();
-  assert.ok(imported.has("Projects-App/session-1.jsonl"), "根目录下的绝对路径应改写为相对路径");
-  assert.equal(imported.has(insidePath), false, "旧的绝对路径行应被清理");
-  assert.ok(imported.has(outsidePath), "不属于该根目录的绝对路径必须保持原样（否则会被改写成 ../../…）");
+  // imported_logs 的键是 `platform\0file_path`：不同平台的相对路径会重名，必须带平台前缀。
+  assert.ok(imported.has(importedLogKey("claude", "Projects-App/session-1.jsonl")), "根目录下的绝对路径应改写为相对路径");
+  assert.equal(imported.has(importedLogKey("claude", insidePath)), false, "旧的绝对路径行应被清理");
+  assert.ok(imported.has(importedLogKey("claude", outsidePath)), "不属于该根目录的绝对路径必须保持原样（否则会被改写成 ../../…）");
 
   // usage_events.source_file 同样要被相对化
   await processImportedChunk(
@@ -253,4 +255,59 @@ test("CSV：以 = + - @ 开头的单元格加单引号，防止公式注入", ()
   assert.ok(dataLine.includes("'-2"), "- 前缀未转义");
   assert.ok(dataLine.includes("'@SUM(A1)"), "@ 前缀未转义");
   assert.ok(dataLine.endsWith(",safe"), "普通值不应被改动");
+});
+
+// ---------------------------------------------------------------------------
+// 数据安全：源不可读时不得清空已导入的历史
+// ---------------------------------------------------------------------------
+
+test("源库表缺失时不得删除已导入的用量（重建路径先删后插的防护）", async () => {
+  // 回归：rebuild 平台是「先删、再解析、再插入」。当源库的预期表读不到时，
+  // 读取器会「成功返回空数组」而不抛错，于是删除清空了此前导入的全部事件，
+  // 文件随即被标记 ready，再也不重试 —— 用户历史被不可逆销毁。
+  const platformDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "token-tracker-zcode-guard-"));
+  const databasePath = path.join(platformDirectory, "guard.sqlite");
+  process.env.TOKEN_TRACKER_ZCODE_DB = databasePath;
+
+  // 因为 platforms.ts 在 require 时读取 env，这里必须清掉模块缓存后重新加载，
+  // 才能让 ZCode 适配器指向本次的临时库。
+  const adapterPath = require.resolve("../src/platforms");
+  const serverPath = require.resolve("../src/server");
+  for (const modulePath of Object.keys(require.cache)) {
+    if (modulePath.includes(`${path.sep}dist${path.sep}src${path.sep}`)) delete require.cache[modulePath];
+  }
+  const { getAdapter } = require(adapterPath) as typeof import("../src/platforms");
+  const { syncPlatform } = require(serverPath) as typeof import("../src/server");
+
+  const modelUsageSchema = [
+    "CREATE TABLE session (id TEXT, directory TEXT)",
+    `CREATE TABLE model_usage (
+       id INTEGER PRIMARY KEY, session_id TEXT, model_id TEXT, started_at TEXT,
+       input_tokens INTEGER, output_tokens INTEGER, cache_creation_input_tokens INTEGER,
+       cache_read_input_tokens INTEGER, computed_total_tokens INTEGER, provider_total_tokens INTEGER)`,
+    "INSERT INTO session VALUES ('guard-session', '/Users/dev/guard')",
+    `INSERT INTO model_usage
+       (session_id, model_id, started_at, input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens, computed_total_tokens, provider_total_tokens)
+     VALUES ('guard-session','model-a','2026-09-01T00:00:00Z',100,50,0,0,150,150)`,
+  ];
+
+  await runSql(databasePath, modelUsageSchema);
+  await syncPlatform("zcode");
+  const { getUsageEventCount } = require("../src/database") as typeof import("../src/database");
+  const afterHealthySync = await getUsageEventCount("zcode");
+  assert.equal(afterHealthySync, 1, "健康源库应导入 1 条事件");
+
+  // 源库的 model_usage 表消失（工具升级 / 库损坏 / 读到半截）
+  await runSql(databasePath, ["DROP TABLE model_usage"]);
+  const state = await syncPlatform("zcode");
+
+  assert.equal(
+    await getUsageEventCount("zcode"),
+    afterHealthySync,
+    "源库不可读时必须保留已导入的事件，而不是先删后插清空",
+  );
+  assert.equal(state.failedFiles, 1, "该文件应被记为失败，以便下次同步重试");
+
+  fs.rmSync(platformDirectory, { recursive: true, force: true });
 });

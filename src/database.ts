@@ -2,6 +2,7 @@
 // 事务经 withTransaction 的 promise 队列串行执行。
 import * as fs from "fs";
 import * as path from "path";
+import { AsyncLocalStorage } from "async_hooks";
 import sqlite3 = require("sqlite3");
 import type {
   EventFilters,
@@ -16,6 +17,12 @@ import type {
 } from "./types";
 
 const sqlite = sqlite3.verbose();
+
+/**
+ * 单条语句绑定参数的上限。SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER = 32766，
+ * 这里留出余量，避免依赖具体编译选项。
+ */
+const MAX_SQL_VARIABLES = 30000;
 
 const dataDirectory: string = process.env.TOKEN_TRACKER_DATA_DIR
   ? path.resolve(process.env.TOKEN_TRACKER_DATA_DIR)
@@ -52,19 +59,34 @@ function run(sql: string, parameters: unknown[] = []): Promise<RunResult> {
   });
 }
 
-// 所有语句共用一条 sqlite 连接，Claude 与 Codex 的同步是并发的，
+// 所有语句共用一条 sqlite 连接，多个平台的同步是并发的，
 // 因此事务必须排队执行，否则会出现 "cannot start a transaction within a transaction"。
 let transactionQueue: Promise<unknown> = Promise.resolve();
 
+// 标记「当前异步上下文正位于某个事务体内」。
+// 必须用 AsyncLocalStorage 而不是一个布尔量：并发的另一个平台调用者并不在
+// 本事务的上下文里，它应该排队等本事务结束，而不是被误并入本事务一起回滚。
+const inTransactionContext = new AsyncLocalStorage<true>();
+
 function withTransaction<T>(work: () => Promise<T>): Promise<T> {
+  // 可重入：已经在事务里的调用直接加入当前事务。
+  // 若在这里再次排队，内层会等待外层释放队列，而外层正在等内层 —— 永久死锁。
+  if (inTransactionContext.getStore()) {
+    return work();
+  }
+
   const result = transactionQueue.then(async () => {
     await run("BEGIN IMMEDIATE TRANSACTION");
     try {
-      const value = await work();
+      const value = await inTransactionContext.run(true, work);
       await run("COMMIT");
       return value;
     } catch (error) {
-      await run("ROLLBACK");
+      try {
+        await run("ROLLBACK");
+      } catch {
+        // ROLLBACK 自身失败（例如 SQLITE_FULL 时 SQLite 已自动回滚）不能覆盖真正的错误原因。
+      }
       throw error;
     }
   });
@@ -101,6 +123,14 @@ function normalizeTokenCount(value: unknown): number {
   return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
 }
 
+/**
+ * imported_logs 的内存索引键：platform 与相对路径都可能含任意字符，
+ * 用 NUL 分隔（与 event_key 的命名空间约定一致），避免拼接歧义。
+ */
+function importedLogKey(platform: string, filePath: string): string {
+  return `${platform}\0${filePath}`;
+}
+
 function getLocalDateRange(value: unknown): [string, string] | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
     return null;
@@ -121,6 +151,55 @@ async function addColumnIfMissing(tableName: string, columnName: string, definit
   if (!columns.some((column) => column.name === columnName)) {
     await run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
   }
+}
+
+/**
+ * 把 imported_logs 的主键从 (file_path) 升级为 (file_path, platform)。
+ *
+ * 旧库里 file_path 是唯一主键，而 file_path 存的是**相对各平台根目录**的路径 ——
+ * `~/.claude/projects/<编码目录>/<会话>.jsonl` 与
+ * `~/.workbuddy/projects/<编码目录>/<会话>.jsonl` 会得到完全相同的字符串。
+ * 两个平台因此在同一行上互相覆盖，且 `deleteUsageEventsForFile` 会连带删掉对方的用量。
+ *
+ * SQLite 不支持修改主键，只能重建表。整段包在一个事务里，避免中途失败留下半张表。
+ */
+async function migrateImportedLogsPrimaryKey(): Promise<void> {
+  const columns = await all<{ name: string; pk: number }>("PRAGMA table_info(imported_logs)");
+  const primaryKeyColumns = columns.filter((column) => Number(column.pk) > 0).map((column) => column.name);
+  const alreadyMigrated =
+    primaryKeyColumns.length === 2 &&
+    primaryKeyColumns.includes("file_path") &&
+    primaryKeyColumns.includes("platform");
+  if (alreadyMigrated) {
+    return;
+  }
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS imported_logs_migrated (
+      file_path TEXT NOT NULL,
+      modified_time_ms REAL NOT NULL,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      byte_offset INTEGER NOT NULL DEFAULT 0,
+      last_sync_at TEXT,
+      status TEXT NOT NULL DEFAULT 'ready',
+      error TEXT,
+      platform TEXT NOT NULL DEFAULT 'claude',
+      PRIMARY KEY (file_path, platform)
+    )
+  `);
+  // 旧主键是 file_path 单列，因此每个 file_path 至多一行，
+  // 迁移后 (file_path, platform) 天然唯一，直接搬运即可。
+  await run(`
+    INSERT INTO imported_logs_migrated (
+      file_path, modified_time_ms, file_size, byte_offset,
+      last_sync_at, status, error, platform
+    )
+    SELECT file_path, modified_time_ms, file_size, byte_offset,
+           last_sync_at, status, error, platform
+    FROM imported_logs
+  `);
+  await run("DROP TABLE imported_logs");
+  await run("ALTER TABLE imported_logs_migrated RENAME TO imported_logs");
 }
 
 async function initializeDatabase(): Promise<void> {
@@ -150,9 +229,10 @@ async function initializeDatabase(): Promise<void> {
     `);
     await run(`
       CREATE TABLE IF NOT EXISTS imported_logs (
-        file_path TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL,
         modified_time_ms REAL NOT NULL,
-        platform TEXT NOT NULL DEFAULT 'claude'
+        platform TEXT NOT NULL DEFAULT 'claude',
+        PRIMARY KEY (file_path, platform)
       )
     `);
     await addColumnIfMissing("imported_logs", "file_size", "INTEGER NOT NULL DEFAULT 0");
@@ -161,6 +241,7 @@ async function initializeDatabase(): Promise<void> {
     await addColumnIfMissing("imported_logs", "status", "TEXT NOT NULL DEFAULT 'ready'");
     await addColumnIfMissing("imported_logs", "error", "TEXT");
     await addColumnIfMissing("imported_logs", "platform", "TEXT NOT NULL DEFAULT 'claude'");
+    await migrateImportedLogsPrimaryKey();
     await run(`
       CREATE TABLE IF NOT EXISTS usage_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -464,21 +545,33 @@ async function queryUsageEventsForSessions(filters: EventFilters = {}, sessions:
   }
 
   const { conditions, parameters } = buildEventConditions(filters, "u");
-  const sessionConditions = sessions.map(() => "(u.session_id = ? AND u.project_name = ?)");
-  conditions.push(`(${sessionConditions.join(" OR ")})`);
-  for (const session of sessions) {
-    parameters.push(session.sessionId, session.projectName);
+  // 用行值 IN (VALUES ...) 而不是 N 个 (session_id = ? AND project_name = ?) 的 OR 串。
+  // OR 串会让 SQLite 的表达式树深度随会话数线性增长，1000 个会话即报
+  // "Expression tree is too large" —— 导出接口按 5000 会话封顶，必然踩中。
+  // 行值写法是平铺的参数列表，只受 SQLITE_MAX_VARIABLE_NUMBER（默认 32766）约束，
+  // 因此再按参数预算分批，保证任意会话数都不会触发上限。
+  const maxPairsPerBatch = Math.max(1, Math.floor((MAX_SQL_VARIABLES - parameters.length) / 2));
+  const results: UsageEvent[] = [];
+  for (let start = 0; start < sessions.length; start += maxPairsPerBatch) {
+    const batch = sessions.slice(start, start + maxPairsPerBatch);
+    const placeholders = batch.map(() => "(?, ?)").join(", ");
+    const batchParameters = [...parameters];
+    for (const session of batch) {
+      batchParameters.push(session.sessionId, session.projectName);
+    }
+    const rows = await all<UsageEvent>(
+      `
+        SELECT ${buildEventSelect("u")}
+        FROM usage_events u
+        WHERE ${conditions.concat([`(u.session_id, u.project_name) IN (VALUES ${placeholders})`]).join(" AND ")}
+        ORDER BY u.timestamp DESC
+      `,
+      batchParameters,
+    );
+    results.push(...rows);
   }
-
-  return all<UsageEvent>(
-    `
-      SELECT ${buildEventSelect("u")}
-      FROM usage_events u
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY u.timestamp DESC
-    `,
-    parameters,
-  );
+  // 分批查询后需在内存里恢复整体的排序语义。
+  return results.sort((left, right) => String(right.timestamp || "").localeCompare(String(left.timestamp || "")));
 }
 
 interface CountRow { count: number }
@@ -627,6 +720,13 @@ async function getFilterOptions(): Promise<FilterOptions> {
   };
 }
 
+/**
+ * 读取全部同步状态。
+ *
+ * 返回的 Map 以 `platform\0file_path` 为键 —— 不同平台的相对路径会完全相同
+ * （见 migrateImportedLogsPrimaryKey 的说明），只用 file_path 会互相覆盖。
+ * 取值请用 `importedLogKey(platform, filePath)`。
+ */
 async function getImportedLogFiles(): Promise<Map<string, ImportedLogState>> {
   await initializeDatabase();
   const rows = await all<{
@@ -643,7 +743,7 @@ async function getImportedLogFiles(): Promise<Map<string, ImportedLogState>> {
            last_sync_at, status, error, platform
     FROM imported_logs
   `);
-  return new Map(rows.map((row) => [row.file_path, {
+  return new Map(rows.map((row) => [importedLogKey(row.platform || "claude", row.file_path), {
     modifiedTimeMs: Number(row.modified_time_ms),
     fileSize: Number(row.file_size),
     byteOffset: Number(row.byte_offset),
@@ -656,20 +756,20 @@ async function getImportedLogFiles(): Promise<Map<string, ImportedLogState>> {
 
 async function markLogFileImported(filePath: string, state: Partial<ImportedLogState>): Promise<void> {
   await initializeDatabase();
+  const platform = state.platform || "claude";
   await run(
     `
       INSERT INTO imported_logs (
         file_path, modified_time_ms, file_size, byte_offset,
         last_sync_at, status, error, platform
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(file_path) DO UPDATE SET
+      ON CONFLICT(file_path, platform) DO UPDATE SET
         modified_time_ms = excluded.modified_time_ms,
         file_size = excluded.file_size,
         byte_offset = excluded.byte_offset,
         last_sync_at = excluded.last_sync_at,
         status = excluded.status,
-        error = excluded.error,
-        platform = excluded.platform
+        error = excluded.error
     `,
     [
       filePath,
@@ -679,21 +779,39 @@ async function markLogFileImported(filePath: string, state: Partial<ImportedLogS
       state.lastSyncAt || new Date().toISOString(),
       state.status || "ready",
       state.error || null,
-      state.platform || "claude",
+      platform,
     ],
   );
 }
 
-async function deleteUsageEventsForFile(filePath: string): Promise<void> {
+/**
+ * 删除某个源文件此前导入的事件。
+ *
+ * 必须同时限定 platform：file_path 是相对各平台根目录的路径，跨平台会重名，
+ * 只按 source_file 删除会连带清掉别的平台的用量（且同步仍报成功）。
+ */
+async function deleteUsageEventsForFile(filePath: string, platform?: string): Promise<void> {
   await initializeDatabase();
-  const sessions = await all<{ sessionId: string; projectName: string }>(
-    "SELECT DISTINCT session_id AS sessionId, project_name AS projectName FROM usage_events WHERE source_file = ?",
-    [filePath],
-  );
-  await run("DELETE FROM usage_events WHERE source_file = ?", [filePath]);
-  for (const session of sessions) {
-    await refreshSessionTotals(session.sessionId, session.projectName);
+  const conditions = ["source_file = ?"];
+  const parameters: unknown[] = [filePath];
+  if (platform) {
+    conditions.push("platform = ?");
+    parameters.push(platform);
   }
+  const whereClause = conditions.join(" AND ");
+
+  // 先算涉及哪些会话，删除后据实重算它们的聚合值。
+  const sessions = await all<{ sessionId: string; projectName: string }>(
+    `SELECT DISTINCT session_id AS sessionId, project_name AS projectName FROM usage_events WHERE ${whereClause}`,
+    parameters,
+  );
+  // 与删除、重算合为一个事务，避免并发同步的另一平台事务回滚时把这次删除一并撤销。
+  await withTransaction(async () => {
+    await run(`DELETE FROM usage_events WHERE ${whereClause}`, parameters);
+    for (const session of sessions) {
+      await refreshSessionTotals(session.sessionId, session.projectName);
+    }
+  });
 }
 
 async function getUsageEventCount(platform?: string): Promise<number> {
@@ -789,13 +907,17 @@ async function migrateSourcePathsToRelative(baseDir: string): Promise<void> {
     const groupedLogs = new Map<string, Array<ImportedLogRow & { relativePath: string }>>();
     for (const row of logs) {
       const relativePath = normalize(row.file_path) as string;
-      const group = groupedLogs.get(relativePath) || [];
+      // 按 (platform, 相对路径) 分组：不同平台的相对路径会完全相同，
+      // 只按路径分组会把两个平台的状态合并成一行、互相覆盖。
+      const groupKey = importedLogKey(row.platform || "claude", relativePath);
+      const group = groupedLogs.get(groupKey) || [];
       group.push({ ...row, relativePath });
-      groupedLogs.set(relativePath, group);
+      groupedLogs.set(groupKey, group);
     }
 
-    for (const [relativePath, rows] of groupedLogs) {
+    for (const [, rows] of groupedLogs) {
       const preferred = chooseImportedLogState(rows);
+      const relativePath = preferred.relativePath;
       if (rows.length > 1 || preferred.file_path !== relativePath) {
         await run("DELETE FROM imported_logs WHERE file_path IN (" + rows.map(() => "?").join(",") + ")", rows.map((row) => row.file_path));
         await run(
@@ -850,8 +972,10 @@ export = {
   getSortClause,
   getFilterOptions,
   getImportedLogFiles,
+  importedLogKey,
   markLogFileImported,
   deleteUsageEventsForFile,
+  withTransaction,
   getUsageEventCount,
   getImportDiagnostics,
   migrateSourcePathsToRelative,
