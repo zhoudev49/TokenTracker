@@ -26,7 +26,10 @@
       (el.refreshInterval as HTMLInputElement).value = String(getSettings().refreshIntervalSeconds);
       hideStatus();
       setConnection("online", t("status.ready"));
-      I18N.onChange(() => { /* 本页无动态文案 */ });
+      // initShell 自己注册的 onChange 会把状态文案重置成「连接中」，而指示灯仍是绿色，
+      // 切换语言后本页就显示「连接中」+ 绿点，自相矛盾。
+      // 本页没有别的动态文案，因此在语言切换后重新写回已连接状态即可。
+      I18N.onChange(() => { setConnection("online", t("status.ready")); });
     } catch (error) {
       console.error(error);
       setConnection("error", t("status.initFailed"));

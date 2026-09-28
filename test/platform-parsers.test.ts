@@ -284,3 +284,141 @@ test("无 id 记录的兜底事件 id 在多次增量解析之间保持稳定且
   );
   assert.ok(secondKeys[0].includes("offset-348"), `兜底 id 应用字节偏移，实际为 ${secondKeys[0]}`);
 });
+
+// ---------------------------------------------------------------------------
+// 回归：token 口径判定的健壮性
+// ---------------------------------------------------------------------------
+
+test("浮点数上报时仍能识别「输入含缓存」口径（不再因先截断而误判）", () => {
+  // 回归：判定用的是已被 Math.trunc 截断的值 —— 上游发 1000.6 / 500.6 / 1501.2 时
+  // 截断成 1000 / 500 / 1501，等值判断失败，于是缓存被叠加到「已含缓存」的输入上，
+  // 总量直接翻倍；而四项相加仍等于总量，分区不变量抓不到这个错误。
+  const normalized = readUsageSnapshot({
+    input_tokens: 1000.6,
+    output_tokens: 500.6,
+    total_tokens: 1501.2,
+    cache_read_input_tokens: 900,
+  });
+  assert.ok(normalized);
+  // 正确口径：input 已含缓存读 → 扣掉 900
+  assert.equal(normalized!.inputTokens, 100);
+  assert.equal(normalized!.cacheReadTokens, 900);
+  assert.equal(normalized!.totalTokens, 1500, "总量应贴近上游上报值 1501，而不是翻倍")
+});
+
+test("整数上报时缓存扣减逻辑保持原样", () => {
+  const normalized = readUsageSnapshot({
+    input_tokens: 1000,
+    output_tokens: 500,
+    total_tokens: 1500,
+    cache_read_input_tokens: 400,
+  });
+  assert.equal(normalized!.inputTokens, 600);
+  assert.equal(normalized!.totalTokens, 1500);
+});
+
+test("缓存量超过输入本身时退回不含缓存口径，不凭空造出 token", () => {
+  // 缓存字段若来自会话级累计（上游已知写法），相减会得到负数并被 Math.max(0,…) 掩盖，
+  // 结果总量大于上游上报值 —— 宁可少扣也不要多算。
+  const normalized = readUsageSnapshot({
+    prompt_tokens: 100,
+    output_tokens: 0,
+    total_tokens: 100,
+    prompt_cache_hit_tokens: 500,
+  });
+  assert.ok(normalized);
+  assert.ok(
+    normalized!.totalTokens <= 600,
+    `总量不应因过度扣减而虚增，实际 ${normalized!.totalTokens}`,
+  );
+  assert.equal(normalized!.inputTokens, 100, "无法证明含缓存口径时按原值保留输入");
+});
+
+test("别名键含不可用值时继续向后查找，而不是把整桶清零", () => {
+  // 回归：`input_tokens: ""` 会让 Number("") = 0 且被判定为「找到了」，
+  // 于是 prompt_tokens 里真正的 500 被丢弃、整桶变 0。
+  const normalized = readUsageSnapshot({
+    input_tokens: "",
+    prompt_tokens: 500,
+    output_tokens: 10,
+    total_tokens: 510,
+  });
+  assert.equal(normalized!.inputTokens, 500, "应回退到 prompt_tokens 的真实值");
+
+  const cache = readUsageSnapshot({
+    input_tokens: 100,
+    output_tokens: 10,
+    cache_read_input_tokens: "n/a",
+    cache_read_tokens: 700,
+  });
+  assert.equal(cache!.cacheReadTokens, 700, "应回退到 cache_read_tokens 的真实值");
+});
+
+/** 通过解析器驱动，因为 details 里的 cached_tokens 是在 pickUsage 阶段补出来的。 */
+function parseUsageRecord(usage: Record<string, unknown>): { inputTokens: number; cacheReadTokens: number; totalTokens: number } | null {
+  const parser = createClaudeJsonlParser({
+    filePath: "/tmp/details.jsonl",
+    storedPath: "p/details.jsonl",
+    projectName: "p",
+    sessionId: "s-details",
+    modifiedTimeMs: 1,
+    fileSize: 1,
+  }, "workbuddy");
+  parser.addLine(JSON.stringify({
+    type: "assistant",
+    sessionId: "s-details",
+    timestamp: "2026-09-01T00:00:00Z",
+    message: { id: "m-details", role: "assistant", usage },
+  }));
+  const result = parser.finish();
+  return result.events[0] || null;
+}
+
+test("camelCase 拼写下的 details.cached_tokens 同样被正确扣除", () => {
+  // 回归：内层重新取键时漏了 promptTokens / completionTokens，
+  // 于是 camelCase 记录读不到值、判定失效，缓存被重复计入 input。
+  const event = parseUsageRecord({
+    promptTokens: 1000,
+    outputTokens: 500,
+    total_tokens: 1500,
+    inputTokensDetails: { cached_tokens: 800 },
+  });
+  assert.ok(event, "应产生一条事件");
+  assert.equal(event!.cacheReadTokens, 800);
+  assert.equal(event!.inputTokens, 200, "cached_tokens 是 input 的子集，必须扣除");
+  assert.equal(event!.totalTokens, 1500);
+});
+
+test("details 里前一个条目为 0 时不丢弃后面真正有值的条目", () => {
+  const event = parseUsageRecord({
+    input_tokens: 1000,
+    output_tokens: 500,
+    total_tokens: 1500,
+    input_tokens_details: [{ cached_tokens: 0 }, { cached_tokens: 800 }],
+  });
+  assert.ok(event);
+  assert.equal(event!.cacheReadTokens, 800);
+});
+
+test("只有 total_tokens 的候选不会挡住后面真正带用量的候选", () => {
+  // pickUsage 按优先级回退候选 usage 对象；某个只有 total_tokens 的占位
+  // 不应让 providerData.rawUsage 里的完整用量被丢弃。
+  const parser = createClaudeJsonlParser({
+    filePath: "/tmp/fallback.jsonl",
+    storedPath: "p/fallback.jsonl",
+    projectName: "p",
+    sessionId: "s-fallback",
+    modifiedTimeMs: 1,
+    fileSize: 1,
+  }, "workbuddy");
+  parser.addLine(JSON.stringify({
+    type: "assistant",
+    sessionId: "s-fallback",
+    timestamp: "2026-09-01T00:00:00Z",
+    message: { id: "m-fallback", usage: { total_tokens: 0 } },
+    providerData: { rawUsage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 } },
+  }));
+  const result = parser.finish();
+  assert.equal(result.events.length, 1, "应回退到 providerData.rawUsage 并产生事件");
+  assert.equal(result.events[0].totalTokens, 120);
+});

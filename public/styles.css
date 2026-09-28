@@ -291,8 +291,6 @@ main { width: min(1540px, 100%); margin: 0 auto; padding: var(--s-5) var(--s-6) 
 .filter-field { display: grid; min-width: 0; gap: 7px; }
 .filter-field label { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
 .filter-field.filter-wide { min-width: 0; }
-/* 字段级说明提示（如设置页的汇率说明） */
-.field-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 
 /* 筛选字段图标（UI/UX Pro Max：SVG 图标、统一 24 栅格、禁用 emoji） */
 .filter-field .field-control { position: relative; display: flex; align-items: center; }
@@ -470,6 +468,13 @@ td:first-child, th:first-child { padding-left: 16px; }
 .number { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .session-id { color: #a9c8fb; font-family: var(--font-mono); font-size: 12px; }
 .project { display: block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+/* 概览页项目用量表的项目名单元格：与 .project 同样的省略号处理，
+   否则较长的项目路径会把该列撑宽、挤压右侧数值列。 */
+.project-name-cell { display: block; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 概览页项目面板：沿用 .panel 的外观，仅收紧与上方图表区的间距 */
+.project-panel { margin-top: 4px; }
+/* 会话详情页 / 设置页的页面级容器：统一最大宽度与内边距 */
+.detail-page, .settings-page { max-width: 1200px; margin: 0 auto; }
 .model { color: #bcc5d0; }
 /* 业务列强调色（黄色 = --amber）：项目用量「总 Token」、会话列表「总 Token」 */
 .project-table td:nth-child(6),

@@ -39,10 +39,58 @@ interface NormalizedUsage {
   totalTokens: number;
 }
 
+/**
+ * 把某个字段转成计数，非可用值返回 null。
+ *
+ * 不能只看 `Number.isFinite(Number(value))`：`Number("")`、`Number("  ")`、`Number(false)`、
+ * `Number([])` 全都等于 0 且是有限数，于是 `input_tokens: ""` 会被当成「确实是 0」，
+ * 别名里真正有值的 `prompt_tokens: 500` 就永远轮不到，整桶变 0。
+ * 因此只接受「数字」或「非空且能解析成数字的字符串」。
+ */
+function toUsableCount(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : null;
+  }
+  // 布尔、数组、对象一律视为无效：它们不是 token 计数的合法表示。
+  return null;
+}
+
 function pickNumber(source: Record<string, unknown>, keys: string[]): { value: number; found: boolean } {
   for (const key of keys) {
     const value = source[key];
-    if (value !== undefined && value !== null) return { value: toTokenCount(value), found: true };
+    if (value === undefined || value === null) continue;
+    const count = toUsableCount(value);
+    // 该键存在但值不可用（空串 / "n/a" / false / {}）：继续找下一个别名，
+    // 而不是认定「找到了 0」并把整桶清零。
+    if (count === null) continue;
+    return { value: count, found: true };
+  }
+  return { value: 0, found: false };
+}
+
+/**
+ * 与 pickNumber 同源，但**保留原始数值不做截断**。
+ * 用于「输入是否含缓存」这类需要做等值判断的场合：上游发浮点数时
+ * （如 1000.6 / 500.6 / 1501.2），先截断再比较会得到 1000 + 500 !== 1501 而误判，
+ * 于是缓存被重复叠加到已含缓存的输入上（总量翻倍，且四项相加仍等于总量，不变量抓不到）。
+ */
+function pickRawNumber(source: Record<string, unknown>, keys: string[]): { value: number; found: boolean } {
+  for (const key of keys) {
+    const value = source[key];
+    if (value === undefined || value === null) continue;
+    // 与 toUsableCount 同样只接受数字或非空数字字符串，但**保留小数**不截断。
+    let count: number;
+    if (typeof value === "number") count = value;
+    else if (typeof value === "string" && value.trim()) count = Number(value.trim());
+    else continue;
+    if (!Number.isFinite(count)) continue;
+    return { value: count, found: true };
   }
   return { value: 0, found: false };
 }
@@ -69,8 +117,20 @@ export function readUsageSnapshot(usage: unknown): NormalizedUsage | null {
   }
 
   // 输入是否已含缓存：上报总量恰为「输入 + 输出」即视为含缓存口径。
-  const inputIncludesCache = reportedTotal.value > 0 && reportedTotal.value === rawInput.value + output.value;
-  const inputTokens = inputIncludesCache
+  // 判定必须用未截断的原始值：浮点数会被逐项 Math.trunc，等值判断随之失效。
+  const rawTotal = pickRawNumber(source, ["total_tokens", "totalTokens"]);
+  const rawInputValue = pickRawNumber(source, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
+  const rawOutputValue = pickRawNumber(source, ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]);
+  // 容忍浮点求和误差（1e-6 相对量级）而不放过大偏差
+  const inputIncludesCache = rawTotal.found
+    && rawTotal.value > 0
+    && Math.abs(rawTotal.value - (rawInputValue.value + rawOutputValue.value)) < 1e-6 * Math.max(1, Math.abs(rawTotal.value));
+
+  // 缓存总量不应超过已含缓存的输入本身：两个缓存字段若来自会话级累计（上游已知的写法），
+  // 相减会凭空造出 token。此时退回不含缓存的口径，宁可少扣也不要多算。
+  const cacheTotal = cacheRead.value + cacheCreation.value;
+  const effectiveIncludesCache = inputIncludesCache && cacheTotal <= rawInput.value;
+  const inputTokens = effectiveIncludesCache
     ? Math.max(0, rawInput.value - cacheRead.value - cacheCreation.value)
     : rawInput.value;
 
@@ -88,12 +148,15 @@ function readCacheReadFromDetails(usage: Record<string, unknown> | null): number
   if (!usage) return 0;
   const details = usage.inputTokensDetails ?? usage.input_tokens_details ?? usage.prompt_tokens_details;
   const list = Array.isArray(details) ? details : details ? [details] : [];
+  // 取所有条目里的最大值：该字段是数组，前面可能存在 cached_tokens=0 的占位条目，
+  // 见到第一个就返回会把后面真正有值的条目丢掉。
+  let best = 0;
   for (const item of list) {
     if (!item || typeof item !== "object") continue;
     const cached = pickNumber(item as Record<string, unknown>, ["cached_tokens", "cachedTokens"]);
-    if (cached.found) return cached.value;
+    if (cached.found && cached.value > best) best = cached.value;
   }
-  return 0;
+  return best;
 }
 
 /** 取记录里第一个可用的 usage 对象，按各家优先级回退。 */
@@ -112,21 +175,36 @@ function pickUsage(record: Record<string, unknown>, extraUsage?: (record: Record
     extraUsage ? extraUsage(record) : null,
   ];
 
+  // 候选列表存在的意义就是「不同平台把用量放在不同位置」，因此不能见到第一个
+  // 能解析出对象就收手：某个平台新加的、只有 total_tokens 的 message.usage 占位
+  // 会把后面 providerData.rawUsage 里真正完整的用量挡掉（该记录直接从统计中消失）。
+  // 记下第一个非空结果作为兜底，优先返回真正带 token 的那个。
+  let fallback: NormalizedUsage | null = null;
   for (const candidate of candidates) {
     const normalized = readUsageSnapshot(candidate);
     if (!normalized) continue;
+    if (!fallback) fallback = normalized;
+    if (normalized.totalTokens === 0) continue;
 
     // total_tokens 缺失时缓存读可能只藏在 *_details 里，这里补一次。
     if (normalized.cacheReadTokens === 0) {
       const detailCacheRead = readCacheReadFromDetails(asRecord(candidate));
       if (detailCacheRead > 0) {
         const raw = asRecord(candidate);
-        const rawInput = raw ? pickNumber(raw, ["input_tokens", "inputTokens", "prompt_tokens"]).value : 0;
-        const output = raw ? pickNumber(raw, ["output_tokens", "outputTokens", "completion_tokens"]).value : 0;
-        const reportedTotal = raw ? pickNumber(raw, ["total_tokens", "totalTokens"]).value : 0;
-        const includesCache = reportedTotal > 0 && reportedTotal === rawInput + output;
-        const inputTokens = includesCache
-          ? Math.max(0, rawInput - detailCacheRead - normalized.cacheCreationTokens)
+        // 键表必须与 readUsageSnapshot 完全一致：此前这里少了 promptTokens / completionTokens，
+        // 于是同一份对象在 camelCase 拼写下这里读不到值、判定失效，缓存被重复计入。
+        const rawInput = raw ? pickRawNumber(raw, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]).value : 0;
+        const output = raw ? pickRawNumber(raw, ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]).value : 0;
+        const reportedTotal = raw ? pickRawNumber(raw, ["total_tokens", "totalTokens"]).value : 0;
+        // 同样是未截断的原始值比较（浮点上游会因逐项取整而误判）。
+        const includesCache = reportedTotal > 0
+          && Math.abs(reportedTotal - (rawInput + output)) < 1e-6 * Math.max(1, Math.abs(reportedTotal));
+        // details 里的 cached_tokens 是 input 的**子集**：只有当 input 本身不含它时才需要相加。
+        // 无法证明口径时（没有 total_tokens），按 OpenAI Responses 的语义默认它是子集，直接扣减，
+        // 否则会把同一批 token 同时记进 input 和 cacheRead。
+        const shouldSubtract = includesCache || (reportedTotal === 0 && detailCacheRead <= rawInput);
+        const inputTokens = shouldSubtract
+          ? Math.max(0, (includesCache ? rawInput : normalized.inputTokens) - detailCacheRead)
           : normalized.inputTokens;
         return {
           ...normalized,
@@ -138,7 +216,7 @@ function pickUsage(record: Record<string, unknown>, extraUsage?: (record: Record
     }
     return normalized;
   }
-  return null;
+  return fallback;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

@@ -206,9 +206,42 @@ function calculateCacheAnalytics(events: UsageEvent[], customPricing: unknown): 
   };
 }
 
+/**
+ * 防 CSV 公式注入：单元格以 `=` `+` `@`、制表/回车符开头，或 `-` 之后能构成公式时，
+ * 前置一个单引号，让表格软件按文本处理。
+ *
+ * `-` 必须单独判断。编码后的项目名一律以 `-` 开头
+ * （`encodeProjectName("/Users/dev/proj")` → `-Users-dev-proj`），
+ * 若把 `-` 与其它前缀一视同仁，**每个 POSIX 用户**导出的项目名都会多一个引号，
+ * 该列再也无法分组、透视或与其它表 join。
+ *
+ * 而 `-Users-dev-proj-app` 并不是可执行的公式：它只有字母与连字符，
+ * 既不构成数字运算，也没有 DDE 所需的 `|`/`!`，表格软件只会报 `#NAME?`。
+ * 真正危险的形态是：
+ *   -2、-2+3      数字表达式
+ *   -(1+1)        函数调用
+ *   -A1           单元格引用
+ *   -cmd|'/c calc'!A1   DDE 命令执行
+ * 因此只在命中这几种形态时才加引号。
+ */
+const CSV_FORMULA_PREFIX = /^[=+@\t\r]/;
+/** `-` 后接数字 / 括号 / 单元格引用，或整串含有可执行的运算符与引用符号。 */
+const CSV_NEGATIVE_FORMULA = /^-\d/;
+const CSV_NEGATIVE_CALL = /^-\s*\(/;
+const CSV_CELL_REFERENCE = /^-[A-Za-z]{1,3}\d{1,7}$/;
+/** `|` 与 `!` 是 DDE 的特征；其余是算术/字符串运算符。 */
+const CSV_EXECUTABLE_CHARS = /[|!()"'=+*/^&%]/;
+
 function csvCell(value: unknown): string {
   const text = String(value ?? "");
-  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  const dangerous = CSV_FORMULA_PREFIX.test(text)
+    || (text.startsWith("-") && (
+      CSV_NEGATIVE_FORMULA.test(text)
+      || CSV_NEGATIVE_CALL.test(text)
+      || CSV_CELL_REFERENCE.test(text)
+      || CSV_EXECUTABLE_CHARS.test(text)
+    ));
+  const safe = dangerous ? `'${text}` : text;
   return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe;
 }
 

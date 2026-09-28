@@ -192,13 +192,24 @@ function calculateUsageCost(events: CostEvent[], customPricing: unknown = null):
   };
 }
 
+/** 自定义定价表的最大可接受长度：正常表格只有几 KB，超长值多半是误用或恶意构造。 */
+const MAX_CUSTOM_PRICING_CHARS = 64 * 1024;
+
 function parseCustomPricing(value: unknown): Record<string, unknown> | null {
   if (!value) {
     return null;
   }
+  // JSON.parse 是同步 CPU 操作，而该参数在 6 个端点上都会被解析：
+  // 不加长度上限时，一个超大的 pricing 查询串就能长时间阻塞事件循环。
+  const text = String(value);
+  if (text.length > MAX_CUSTOM_PRICING_CHARS) {
+    return null;
+  }
   try {
-    const pricing: unknown = JSON.parse(String(value));
-    return pricing && typeof pricing === "object" ? (pricing as Record<string, unknown>) : null;
+    const pricing: unknown = JSON.parse(text);
+    return pricing && typeof pricing === "object" && !Array.isArray(pricing)
+      ? (pricing as Record<string, unknown>)
+      : null;
   } catch {
     return null;
   }

@@ -68,7 +68,7 @@ TokenTracker 就是从这几条出发做的：**把本机已有的日志读出�
 
 ## 快速开始
 
-需要 **Node.js 18+**。
+需要 **Node.js 20.17+**（`sqlite3` 的原生模块要求）。
 
 ```bash
 git clone https://github.com/<your-name>/TokenTracker.git

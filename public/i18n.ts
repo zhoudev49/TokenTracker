@@ -303,13 +303,29 @@
     const table = dict[lang] as Record<string, string>;
     const zhTable = dict.zh as Record<string, string>;
     let text: string = table[key] ?? zhTable[key] ?? key;
-    args.forEach((arg, i) => { text = text.replace(new RegExp("\\{" + i + "\\}", "g"), String(arg)); });
+    // 必须用替换函数而不是替换字符串：String.replace 会展开替换串里的
+    // `$&`、`` $` ``、`$'`、`$1` 等模式，而参数值来自日志（项目名、工具名等），
+    // 含这些字符时文案会被改写（如 `a$'b` 会把后面的内容再插一遍）。
+    args.forEach((arg, i) => { text = text.replace(new RegExp("\\{" + i + "\\}", "g"), () => String(arg)); });
     return text;
   }
 
   // 应用静态文本：data-i18n（textContent）、data-i18n-placeholder、data-i18n-title（<title>）
   function applyStatic(): void {
-    document.querySelectorAll<HTMLElement>("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n || ""); });
+    // 只在元素「没有元素子节点」时整体替换 textContent。
+    // textContent 会连同子元素一起清掉：筛选条的两个按钮内嵌了 <svg class="btn-icon">，
+    // 直接赋值会抹掉图标，`.button.is-syncing .btn-icon` 的旋转动画随之失效。
+    // 带子元素的场景只更新直接文本节点，保留 <svg>。
+    document.querySelectorAll<HTMLElement>("[data-i18n]").forEach((el) => {
+      const text = t(el.dataset.i18n || "");
+      if (el.childElementCount === 0) {
+        el.textContent = text;
+        return;
+      }
+      const textNode = Array.from(el.childNodes).find((node) => node.nodeType === 3 /* TEXT_NODE */);
+      if (textNode) textNode.nodeValue = text;
+      else el.appendChild(document.createTextNode(text));
+    });
     document.querySelectorAll<HTMLElement>("[data-i18n-placeholder]").forEach((el) => { el.setAttribute("placeholder", t(el.dataset.i18nPlaceholder || "")); });
     document.querySelectorAll<HTMLElement>("[data-i18n-title]").forEach((el) => { document.title = `TokenTracker · ${t(el.dataset.i18nTitle || "")}`; });
     document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
@@ -333,9 +349,12 @@
   function getLang(): "zh" | "en" { return lang; }
   function dateTimeLocale(): "zh-CN" | "en-US" { return lang === "zh" ? "zh-CN" : "en-US"; }
 
-  // flatpickr 中文 locale；英文直接返回 undefined，flatpickr 会使用内置英文默认。
-  function flatpickrLocale(): FlatpickrLocale | undefined {
-    if (lang !== "zh") return undefined;
+  // flatpickr 中文 locale；英文返回 null，调用方据此**省略** locale 字段。
+  // 不能返回 undefined 再直接赋值给 locale：flatpickr 会把 undefined 当成
+  // 一个「未知语言名」而报 "flatpickr: invalid locale undefined"，
+  // 每次英文页面加载都会打印告警。省略该键才会走它内置的英文默认。
+  function flatpickrLocale(): FlatpickrLocale | null {
+    if (lang !== "zh") return null;
     return {
       weekdays: { shorthand: ["日", "一", "二", "三", "四", "五", "六"], longhand: ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"] },
       months: { shorthand: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"], longhand: ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"] },

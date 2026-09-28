@@ -218,9 +218,18 @@
     return pager;
   }
 
+  const DEFAULT_EVENT_SORT = { field: "timestamp", direction: "asc" as const };
+
   function onSortHeader(field: string): void {
     if (eventSort.field === field) {
-      eventSort.direction = eventSort.direction === "asc" ? "desc" : "asc";
+      // 三态循环：asc → desc → 回到默认排序。
+      // 只切 asc/desc 的话，用户永远回不到初始状态（第三次点击又变回 asc）。
+      if (eventSort.direction === "asc") {
+        eventSort.direction = "desc";
+      } else {
+        eventSort.field = DEFAULT_EVENT_SORT.field;
+        eventSort.direction = DEFAULT_EVENT_SORT.direction;
+      }
     } else {
       eventSort.field = field;
       eventSort.direction = field === "timestamp" ? "asc" : "desc";

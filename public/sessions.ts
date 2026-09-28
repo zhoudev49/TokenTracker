@@ -51,9 +51,16 @@
     return cell;
   }
 
-  function renderSessions(pageData: any): void {
+  async function renderSessions(pageData: any): Promise<void> {
     sessions = Array.isArray(pageData.items) ? pageData.items : [];
     sessionPage = { page: pageData.page, pageSize: pageData.pageSize, total: pageData.total, totalPages: pageData.totalPages };
+    // 数据变少（同步删除了行、或筛选条件收窄）时，当前页可能越界。
+    // 服务端会照常返回空列表，界面就停在「第 5 页 / 共 1 页」且表格为空，只能手动退回。
+    if (sessionPage.page > sessionPage.totalPages) {
+      sessionPage.page = Math.max(1, sessionPage.totalPages);
+      await loadData();
+      return;
+    }
     const body = el.sessionTableBody as HTMLTableSectionElement;
     body.replaceChildren();
     (el.tableMeta as HTMLElement).textContent = t("sessions.records", formatTokens(sessionPage.total));
@@ -88,10 +95,13 @@
 
   function formatTimeCell(value: unknown): string { const d = new Date(String(value)); if (Number.isNaN(d.getTime())) return "--"; return new Intl.DateTimeFormat(I18N.dateTimeLocale(), { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(d); }
 
-  const loadData = makeLoader(async () => {
+  const loadData = makeLoader(async (isCurrent) => {
     setConnection("", t("status.refreshing"));
     const data = await apiFetch(`/api/sessions?${buildSessionQuery()}`);
-    renderSessions(data);
+    // 渲染前确认仍是最新一次请求：翻页/搜索/排序会连续发起多次请求，
+    // 慢的旧响应若照常渲染，表格会退回上一次的条件结果。
+    if (!isCurrent()) return;
+    await renderSessions(data);
     setConnection("online", t("status.online", new Date().toLocaleTimeString(I18N.dateTimeLocale(), { hour12: false })));
   });
 

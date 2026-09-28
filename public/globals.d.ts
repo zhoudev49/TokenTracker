@@ -8,7 +8,8 @@ interface I18NAPI {
   applyStatic(): void;
   getLang(): "zh" | "en";
   dateTimeLocale(): "zh-CN" | "en-US";
-  flatpickrLocale(): FlatpickrLocale | undefined;
+  /** 中文返回 locale，英文返回 null（调用方应省略 locale 字段，而不是传 undefined）。 */
+  flatpickrLocale(): FlatpickrLocale | null;
   lang: string;
   dict: Record<string, Record<string, string>>;
 }
@@ -47,10 +48,15 @@ interface TomSelectConfig {
 }
 
 interface TomSelectInstance {
+  /** 第二个参数是 silent：传 true 不派发 change 事件。 */
   setValue(value: string, silent?: boolean): void;
   clear(silent?: boolean): void;
   clearOptions(): void;
   addOption(option: { value: string; text: string }): void;
+  getValue(): string | string[];
+  /** 内部选项 store：TomSelect 只把「已选中」的项同步回原生 <select>，
+   *  非选中项只能从这里查到（用于存在性判断）。 */
+  readonly options: Record<string, unknown>;
 }
 
 type TomSelectFactory = new (el: HTMLElement, config: TomSelectConfig) => TomSelectInstance;
@@ -98,7 +104,8 @@ interface TokenTrackerAPI {
   runSync(options?: { onComplete?: () => Promise<void>; silent?: boolean }): Promise<void>;
   triggerSync(onChange?: (() => void) | null): Promise<void>;
   triggerSyncBackground(onChange?: (() => void) | null): Promise<void>;
-  makeLoader(renderFn: (...args: any[]) => Promise<any>): (...args: any[]) => Promise<any>;
+  /** renderFn 会收到 isCurrent()，应在**渲染 DOM 之前**调用它丢弃过期响应。 */
+  makeLoader(renderFn: (isCurrent: () => boolean, ...args: any[]) => Promise<any>): (...args: any[]) => Promise<any>;
   setFilterValue(id: string, value: string): boolean;
   clearProjectFilter(): void;
 }

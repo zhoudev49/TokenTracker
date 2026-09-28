@@ -109,16 +109,31 @@ export function toTokenCount(value: unknown): number {
  * Qoder 用 ISO，ZCode 用 ISO。数字同时兼容秒（10 位）与毫秒（13 位）。
  */
 export function normalizeTimestamp(value: unknown): string | null {
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "number" || /^\d+$/.test(String(value))) {
-    const raw = Number(value);
+  if (value === null || value === undefined) return null;
+  const asText = typeof value === "string" ? value.trim() : value;
+  if (asText === "") return null;
+
+  // 合理的年份范围：超出这个范围的值一律视为无效。
+  // 微秒时间戳（JS/Python 混用时的常见笔误，2025 年约 1.7e15）会被当成毫秒 → 公元 58686 年，
+  // 这类行虽然入库，却落在所有日期范围查询之外，等于静默消失；不如直接判为无效。
+  const MIN_YEAR = 2000;
+  const MAX_YEAR = 2100;
+  const inRange = (date: Date): boolean => {
+    const year = date.getUTCFullYear();
+    return year >= MIN_YEAR && year <= MAX_YEAR;
+  };
+
+  if (typeof asText === "number" || /^\d+$/.test(String(asText))) {
+    const raw = Number(asText);
     if (!Number.isFinite(raw) || raw <= 0) return null;
     const milliseconds = raw < 1e12 ? raw * 1000 : raw;
     const fromEpoch = new Date(milliseconds);
-    return Number.isNaN(fromEpoch.getTime()) ? null : fromEpoch.toISOString();
+    if (Number.isNaN(fromEpoch.getTime()) || !inRange(fromEpoch)) return null;
+    return fromEpoch.toISOString();
   }
-  const timestamp = new Date(String(value));
-  return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
+  const timestamp = new Date(String(asText));
+  if (Number.isNaN(timestamp.getTime()) || !inRange(timestamp)) return null;
+  return timestamp.toISOString();
 }
 
 /**
@@ -166,10 +181,15 @@ export function walkFiles(
 }
 
 /**
- * 读取文件头部并抽出第一个 cwd 字段。
+ * 读取文件头部并抽出**顶层** cwd 字段。
  * 会话日志的每条记录通常都带 cwd，因此只读文件头即可，不必整份解析。
  * 注意首条记录可能是很长的用户消息（cwd 排在 content 之后），
  * 所以这里默认读 512KB 而不是几 KB，否则会漏判、退化成可读性很差的字符串解码结果。
+ *
+ * 必须逐行解析、只认顶层字段：日志里会原样保存工具输出，而 `pwd`、`cd`、
+ * `git worktree` 这类命令的结果本身就可能是一段带 `cwd` 的 JSON。
+ * 用正则取「第一个 cwd 子串」会命中嵌套的那一个，于是项目真实路径被写错，
+ * 进而影响所有页面的项目名显示。
  */
 export function readCwdFromFileHeader(filePath: string, bytes = 512 * 1024): string | null {
   let fd: number;
@@ -182,6 +202,24 @@ export function readCwdFromFileHeader(filePath: string, bytes = 512 * 1024): str
     const buffer = Buffer.alloc(bytes);
     const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
     const text = buffer.subarray(0, bytesRead).toString("utf8");
+
+    // 优先逐行解析取顶层 cwd。
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const record: unknown = JSON.parse(line);
+        if (record && typeof record === "object" && !Array.isArray(record)) {
+          const cwd = (record as Record<string, unknown>).cwd;
+          if (typeof cwd === "string" && cwd) return cwd;
+        }
+      } catch {
+        // 这一行不完整（多半是 512KB 截断处）—— 继续看下一行没有意义，交给正则兜底。
+        break;
+      }
+    }
+
+    // 兜底：文件头部没有可解析的完整行，或首行过长被截断时，退回正则。
+    // 此时仍可能命中嵌套 cwd，但没有更好的信息来源，且这种文件本就极少。
     const match = text.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
     if (!match) return null;
     try {
@@ -196,8 +234,14 @@ export function readCwdFromFileHeader(filePath: string, bytes = 512 * 1024): str
   }
 }
 
-/** 读取文件首行并解析为 JSON（拿 sessionId / cwd / model 等元信息）。 */
-export function readFirstJsonLine(filePath: string): Record<string, unknown> | null {
+/**
+ * 读取文件首行并解析为 JSON（拿 sessionId / cwd / model 等元信息）。
+ *
+ * 读取上限与 readCwdFromFileHeader 保持一致：会话首行常常是一条很大的
+ * last-prompt / 用户消息记录，64KB 的旧上限在真实日志上会直接截断成非法 JSON
+ * 而返回 null（同一个坑 readCwdFromFileHeader 已经踩过）。
+ */
+export function readFirstJsonLine(filePath: string, bytes = 512 * 1024): Record<string, unknown> | null {
   let fd: number;
   try {
     fd = fs.openSync(filePath, "r");
@@ -205,14 +249,16 @@ export function readFirstJsonLine(filePath: string): Record<string, unknown> | n
     return null;
   }
   try {
-    const buffer = Buffer.alloc(64 * 1024);
+    const buffer = Buffer.alloc(bytes);
     const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
     const text = buffer.subarray(0, bytesRead).toString("utf8");
     const newline = text.indexOf("\n");
     const firstLine = newline === -1 ? text : text.slice(0, newline);
     if (!firstLine.trim()) return null;
     const parsed: unknown = JSON.parse(firstLine);
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
     return null;
   } finally {

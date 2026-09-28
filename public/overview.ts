@@ -87,7 +87,7 @@
     modelChart.options.plugins.tooltip.enabled = hasData; modelChart.update();
   }
 
-  const loadData = makeLoader(async () => {
+  const loadData = makeLoader(async (isCurrent) => {
     setConnection("", t("status.refreshing"));
     const baseQuery = getFilterParams();
     const [summary, projects, cache] = await Promise.all([
@@ -95,6 +95,9 @@
       apiFetch(`/api/projects?${baseQuery}`),
       apiFetch(`/api/cache-efficiency?${baseQuery}`),
     ]);
+    // 渲染前确认这次请求仍是最新一次：轮询与筛选切换会让旧请求晚于新请求返回，
+    // 不丢弃就会用陈旧数据覆盖刚渲染好的界面。
+    if (!isCurrent()) return;
     renderOverview(summary, cache);
     renderProjects(projects);
     renderTrendChart(summary.dailyTrend || []);

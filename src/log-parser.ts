@@ -1,18 +1,10 @@
 // Claude Code .jsonl 日志解析：token 抽取、原文分段（text/thinking/tool_use/tool_result）。
 import type { LogFileInfo, ParsedLog, Segment, SessionSummary, UsageEvent } from "./types";
-
-function toTokenCount(value: unknown): number {
-  const count = Number(value);
-  return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
-}
-
-function normalizeTimestamp(value: unknown): string | null {
-  if (!value) {
-    return null;
-  }
-  const timestamp = new Date(String(value));
-  return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
-}
+// 时间戳与 token 归一统一走 platform-adapter 的共享实现。
+// 这里原本有一份自己的 normalizeTimestamp，只做 new Date(String(value))，
+// 于是数字毫秒时间戳（WorkBuddy/CodeBuddy 等形态）会得到 Invalid Date → null，
+// 该行被所有日期筛选静默排除。共享实现兼容 ISO 字符串与秒/毫秒整数。
+import { normalizeTimestamp, toTokenCount } from "./platform-adapter";
 
 interface ContentBlock {
   type?: string;

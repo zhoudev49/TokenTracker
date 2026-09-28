@@ -18,7 +18,7 @@
     "url": "git+https://github.com/<your-name>/TokenTracker.git"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.17.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.frontend.json",
@@ -26,7 +26,8 @@
     "prestart": "npm run build",
     "dev": "concurrently -k -n backend,frontend,server \"tsc -p tsconfig.json -w\" \"tsc -p tsconfig.frontend.json -w\" \"nodemon --watch dist dist/src/server.js\"",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "prepublishOnly": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "claude-code",
@@ -54,10 +55,8 @@
     "sqlite3": "^6.0.1"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.1.2",
-    "@types/sqlite3": "^3.1.11",
     "concurrently": "^10.0.4",
     "nodemon": "^3.1.14",
     "typescript": "^7.0.2"

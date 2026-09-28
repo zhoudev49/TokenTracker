@@ -148,8 +148,18 @@ interface ColumnInfoRow { name: string }
 
 async function addColumnIfMissing(tableName: string, columnName: string, definition: string): Promise<void> {
   const columns = await all<ColumnInfoRow>(`PRAGMA table_info(${tableName})`);
-  if (!columns.some((column) => column.name === columnName)) {
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+  try {
     await run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  } catch (error) {
+    // 先查后改不是原子的：两个进程（例如 npm run dev 与 npm start 共用同一 data 目录）
+    // 可能同时判定「列不存在」并各自 ALTER，后到者会收到 duplicate column name。
+    // 这属于良性竞争（列已经存在，正是我们想要的结果），不应让启动失败。
+    if (!/duplicate column name/i.test(String((error as Error).message))) {
+      throw error;
+    }
   }
 }
 
@@ -242,6 +252,15 @@ async function initializeDatabase(): Promise<void> {
     await addColumnIfMissing("imported_logs", "error", "TEXT");
     await addColumnIfMissing("imported_logs", "platform", "TEXT NOT NULL DEFAULT 'claude'");
     await migrateImportedLogsPrimaryKey();
+    // sessions 早期只有 (session_id, project_name, timestamp, model)，token 五列是后加的。
+    // 这里必须补齐：否则老库上 initializeDatabase 会「成功」，直到导入中途
+    // refreshSessionTotals 才报 "table sessions has no column named total_tokens"，
+    // 平台同步整批失败，而文档承诺的是「既有数据库原地升级」。
+    await addColumnIfMissing("sessions", "total_tokens", "INTEGER NOT NULL DEFAULT 0");
+    await addColumnIfMissing("sessions", "input_tokens", "INTEGER NOT NULL DEFAULT 0");
+    await addColumnIfMissing("sessions", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
+    await addColumnIfMissing("sessions", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");
+    await addColumnIfMissing("sessions", "cache_creation_tokens", "INTEGER NOT NULL DEFAULT 0");
     await run(`
       CREATE TABLE IF NOT EXISTS usage_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,9 +288,16 @@ async function initializeDatabase(): Promise<void> {
     await run("CREATE INDEX IF NOT EXISTS idx_usage_events_source ON usage_events(source_file)");
     await run("CREATE INDEX IF NOT EXISTS idx_usage_events_platform ON usage_events(platform)");
     await run("PRAGMA user_version = 2");
-  })().catch((error) => {
+  })().catch(async (error) => {
+    // 初始化失败必须把已打开的连接关掉再抛出：initializationPromise 会被清空，
+    // 下次请求会重试并再次 open，若不关闭就会每次失败泄漏一个连接（含 WAL/-shm 句柄与锁），
+    // 最终耗尽文件描述符，并让数据库文件被永久占用。
     initializationPromise = null;
+    const dying = database;
     database = null;
+    if (dying) {
+      await new Promise<void>((resolve) => dying.close(() => resolve()));
+    }
     throw error;
   });
 
@@ -504,13 +530,21 @@ function buildEventSelect(alias = ""): string {
 }
 
 function getPagination(filters: Record<string, unknown> = {}): Pagination {
-  const page = Math.max(1, Math.trunc(Number(filters.page) || 1));
-  const pageSize = Math.min(200, Math.max(1, Math.trunc(Number(filters.pageSize) || 50)));
+  // Number.isFinite 而不是 `|| 1`：Number("Infinity") 是 truthy，`|| 1` 不会兜底，
+  // 于是 offset 变成 Infinity 被绑进 LIMIT/OFFSET，报 SQLITE_MISMATCH（未处理的 500），
+  // 而且 page 会被 JSON.stringify 序列化成 null，破坏分页契约。
+  const rawPage = Math.trunc(Number(filters.page));
+  const page = Number.isFinite(rawPage) ? Math.min(1_000_000, Math.max(1, rawPage)) : 1;
+  const rawPageSize = Math.trunc(Number(filters.pageSize));
+  const pageSize = Number.isFinite(rawPageSize) ? Math.min(200, Math.max(1, rawPageSize)) : 50;
   return { page, pageSize, offset: (page - 1) * pageSize };
 }
 
 function getSortClause(sort: string, direction: string, allowed: Record<string, string>, fallback: string): string {
-  const field = allowed[sort] || fallback;
+  // 必须是「自有属性」判断：`allowed[sort]` 会走原型链，
+  // 于是 ?sort=constructor / toString / valueOf / __proto__ 会把一个**函数**当成字段名
+  // 插进 ORDER BY，产生 `ORDER BY function Object() {...}` 的 SQL 语法错误 500。
+  const field = Object.prototype.hasOwnProperty.call(allowed, sort) ? allowed[sort] : fallback;
   const order = String(direction).toLowerCase() === "asc" ? "ASC" : "DESC";
   return `${field} ${order}`;
 }
@@ -528,12 +562,15 @@ async function queryUsageEvents(filters: EventFilters = {}, options: QueryOption
   const { conditions, parameters } = buildEventConditions(filters, options.alias || "");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const orderBy = options.orderBy || "timestamp DESC";
+  // 追加一个唯一列作为并列时的兜底排序键：ORDER BY 的键不唯一时，
+  // SQLite 对并列行的返回顺序是不确定的，分页会出现「某行重复出现、另一行被跳过」。
+  const stableOrderBy = `${orderBy}, id ASC`;
   const limitClause = options.limit ? " LIMIT ? OFFSET ?" : "";
   const queryParameters = options.limit
     ? [...parameters, options.limit, options.offset || 0]
     : parameters;
   return all<UsageEvent>(
-    `SELECT ${buildEventSelect(options.alias || "")} FROM ${options.from || "usage_events"} ${options.alias ? options.alias : ""} ${whereClause} ORDER BY ${orderBy}${limitClause}`,
+    `SELECT ${buildEventSelect(options.alias || "")} FROM ${options.from || "usage_events"} ${options.alias ? options.alias : ""} ${whereClause} ORDER BY ${stableOrderBy}${limitClause}`,
     queryParameters,
   );
 }
@@ -588,7 +625,8 @@ async function querySessions(filters: EventFilters = {}, options: QueryOptions =
   await initializeDatabase();
   const { conditions, parameters } = buildEventConditions(filters, "u");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const sortClause = options.orderBy || "timestamp DESC";
+  // 同上：并列时用分组键兜底，保证翻页不重不漏。
+  const sortClause = `${options.orderBy || "timestamp DESC"}, u.session_id ASC, u.project_name ASC, u.platform ASC`;
   const limitClause = options.limit ? " LIMIT ? OFFSET ?" : "";
   const queryParameters = options.limit
     ? [...parameters, options.limit, options.offset || 0]
@@ -614,7 +652,10 @@ async function querySessions(filters: EventFilters = {}, options: QueryOptions =
         SUM(u.cache_creation_tokens) AS cacheCreationTokens
       FROM usage_events u
       ${whereClause}
-      GROUP BY u.session_id, u.project_name
+      -- 必须把 platform 也放进 GROUP BY：platform 过滤条件只作用在 WHERE 上，
+      -- 若分组忽略它，跨平台重名的 (session_id, project_name) 会被合成一行、
+      -- 汇总两个平台的 token，却只顶着 MIN(platform) 一个标签。
+      GROUP BY u.session_id, u.project_name, u.platform
       ORDER BY ${sortClause}${limitClause}
     `,
     queryParameters,
@@ -625,7 +666,7 @@ async function countSessions(filters: EventFilters = {}): Promise<number> {
   await initializeDatabase();
   const { conditions, parameters } = buildEventConditions(filters, "u");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const row = await get<CountRow>(`SELECT COUNT(*) AS count FROM (SELECT 1 FROM usage_events u ${whereClause} GROUP BY u.session_id, u.project_name)`, parameters);
+  const row = await get<CountRow>(`SELECT COUNT(*) AS count FROM (SELECT 1 FROM usage_events u ${whereClause} GROUP BY u.session_id, u.project_name, u.platform)`, parameters);
   return Number(row.count);
 }
 
@@ -665,21 +706,40 @@ async function getSessionEvents(sessionId: string, projectName: string): Promise
   return getSessionEventPage(sessionId, projectName);
 }
 
-async function getSessionEventPage(sessionId: string, projectName: string, options: QueryOptions = {}): Promise<UsageEvent[]> {
+async function getSessionEventPage(
+  sessionId: string,
+  projectName: string,
+  options: QueryOptions & { platform?: string } = {},
+): Promise<UsageEvent[]> {
   await initializeDatabase();
-  return queryUsageEvents({ sessionId, projectName }, {
+  // platform 可选：session_id 跨平台并不唯一，调用方（会话详情接口）必须传，
+  // 否则会把别的平台同名会话的事件一并返回。
+  const filters = options.platform
+    ? { sessionId, projectName, platform: options.platform }
+    : { sessionId, projectName };
+  return queryUsageEvents(filters, {
     orderBy: options.orderBy || "timestamp ASC",
     limit: options.limit,
     offset: options.offset || 0,
   });
 }
 
-async function countSessionEvents(sessionId: string, projectName: string): Promise<number> {
-  return countUsageEvents({ sessionId, projectName });
+async function countSessionEvents(sessionId: string, projectName: string, platform?: string): Promise<number> {
+  return countUsageEvents(platform ? { sessionId, projectName, platform } : { sessionId, projectName });
 }
 
-async function getSessionModelUsage(sessionId: string, projectName: string): Promise<Array<{ model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; totalTokens: number }>> {
+async function getSessionModelUsage(
+  sessionId: string,
+  projectName: string,
+  platform?: string,
+): Promise<Array<{ model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; totalTokens: number }>> {
   await initializeDatabase();
+  const conditions = ["session_id = ?", "project_name = ?"];
+  const parameters: unknown[] = [sessionId, projectName];
+  if (platform) {
+    conditions.push("platform = ?");
+    parameters.push(platform);
+  }
   return all<{ model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; totalTokens: number }>(
     `
       SELECT
@@ -690,10 +750,12 @@ async function getSessionModelUsage(sessionId: string, projectName: string): Pro
         SUM(cache_creation_tokens) AS cacheCreationTokens,
         SUM(total_tokens) AS totalTokens
       FROM usage_events
-      WHERE session_id = ? AND project_name = ?
-      GROUP BY model
+      WHERE ${conditions.join(" AND ")}
+      -- 与 SELECT 的 COALESCE 保持一致：否则 NULL 与字面量 'unknown' 会分成两组、
+      -- 返回两条同名记录，按模型聚合时键冲突。
+      GROUP BY COALESCE(model, 'unknown')
     `,
-    [sessionId, projectName],
+    parameters,
   );
 }
 

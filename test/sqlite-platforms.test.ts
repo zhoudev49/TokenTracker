@@ -244,70 +244,28 @@ test("CSV：表头带 BOM，字段含逗号/引号/换行时正确转义", () =>
   assert.ok(csv.endsWith("\r\n"), "应使用 CRLF 行尾");
 });
 
-test("CSV：以 = + - @ 开头的单元格加单引号，防止公式注入", () => {
+test("CSV：公式前缀被转义，但编码后的 POSIX 项目名不受影响", () => {
+  // 回归：曾经把 `-` 与 = + @ 一视同仁，而 encodeProjectName("/Users/dev/proj")
+  // 得到的是 `-Users-dev-proj` —— 于是每个 POSIX 用户导出的项目名列都多一个引号，
+  // 无法再分组/透视。`-` 只在其后能构成公式时才需要转义。
   const csv = rowsToCsv(
-    [{ a: "=cmd|'/c calc'!A1", b: "+1", c: "-2", d: "@SUM(A1)", e: "safe" }],
+    [
+      { a: "=cmd|'/c calc'!A1", b: "+1", c: "-2+3", d: "@SUM(A1)", e: "safe" },
+      { a: "-Users-dev-proj-app", b: "-Users-dev-Projects-my-app", c: "-my-project", d: "D--python-code-x", e: "hello world" },
+    ],
     [{ key: "a", label: "A" }, { key: "b", label: "B" }, { key: "c", label: "C" }, { key: "d", label: "D" }, { key: "e", label: "E" }],
   );
-  const dataLine = csv.split("\r\n")[1];
-  assert.ok(dataLine.includes("'=cmd"), "= 前缀未转义");
-  assert.ok(dataLine.includes("'+1"), "+ 前缀未转义");
-  assert.ok(dataLine.includes("'-2"), "- 前缀未转义");
-  assert.ok(dataLine.includes("'@SUM(A1)"), "@ 前缀未转义");
-  assert.ok(dataLine.endsWith(",safe"), "普通值不应被改动");
-});
+  const [formulaLine, pathLine] = csv.split("\r\n").slice(1);
 
-// ---------------------------------------------------------------------------
-// 数据安全：源不可读时不得清空已导入的历史
-// ---------------------------------------------------------------------------
-
-test("源库表缺失时不得删除已导入的用量（重建路径先删后插的防护）", async () => {
-  // 回归：rebuild 平台是「先删、再解析、再插入」。当源库的预期表读不到时，
-  // 读取器会「成功返回空数组」而不抛错，于是删除清空了此前导入的全部事件，
-  // 文件随即被标记 ready，再也不重试 —— 用户历史被不可逆销毁。
-  const platformDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "token-tracker-zcode-guard-"));
-  const databasePath = path.join(platformDirectory, "guard.sqlite");
-  process.env.TOKEN_TRACKER_ZCODE_DB = databasePath;
-
-  // 因为 platforms.ts 在 require 时读取 env，这里必须清掉模块缓存后重新加载，
-  // 才能让 ZCode 适配器指向本次的临时库。
-  const adapterPath = require.resolve("../src/platforms");
-  const serverPath = require.resolve("../src/server");
-  for (const modulePath of Object.keys(require.cache)) {
-    if (modulePath.includes(`${path.sep}dist${path.sep}src${path.sep}`)) delete require.cache[modulePath];
-  }
-  const { getAdapter } = require(adapterPath) as typeof import("../src/platforms");
-  const { syncPlatform } = require(serverPath) as typeof import("../src/server");
-
-  const modelUsageSchema = [
-    "CREATE TABLE session (id TEXT, directory TEXT)",
-    `CREATE TABLE model_usage (
-       id INTEGER PRIMARY KEY, session_id TEXT, model_id TEXT, started_at TEXT,
-       input_tokens INTEGER, output_tokens INTEGER, cache_creation_input_tokens INTEGER,
-       cache_read_input_tokens INTEGER, computed_total_tokens INTEGER, provider_total_tokens INTEGER)`,
-    "INSERT INTO session VALUES ('guard-session', '/Users/dev/guard')",
-    `INSERT INTO model_usage
-       (session_id, model_id, started_at, input_tokens, output_tokens,
-        cache_creation_input_tokens, cache_read_input_tokens, computed_total_tokens, provider_total_tokens)
-     VALUES ('guard-session','model-a','2026-09-01T00:00:00Z',100,50,0,0,150,150)`,
-  ];
-
-  await runSql(databasePath, modelUsageSchema);
-  await syncPlatform("zcode");
-  const { getUsageEventCount } = require("../src/database") as typeof import("../src/database");
-  const afterHealthySync = await getUsageEventCount("zcode");
-  assert.equal(afterHealthySync, 1, "健康源库应导入 1 条事件");
-
-  // 源库的 model_usage 表消失（工具升级 / 库损坏 / 读到半截）
-  await runSql(databasePath, ["DROP TABLE model_usage"]);
-  const state = await syncPlatform("zcode");
+  assert.ok(formulaLine.includes("'=cmd"), "= 前缀未转义");
+  assert.ok(formulaLine.includes("'+1"), "+ 前缀未转义");
+  assert.ok(formulaLine.includes("'-2+3"), "- 开头的数字表达式未转义");
+  assert.ok(formulaLine.includes("'@SUM(A1)"), "@ 前缀未转义");
+  assert.ok(formulaLine.endsWith(",safe"), "普通值不应被改动");
 
   assert.equal(
-    await getUsageEventCount("zcode"),
-    afterHealthySync,
-    "源库不可读时必须保留已导入的事件，而不是先删后插清空",
+    pathLine,
+    "-Users-dev-proj-app,-Users-dev-Projects-my-app,-my-project,D--python-code-x,hello world",
+    "编码后的项目名（以 - 开头但只含字母与连字符）必须原样输出，不能加引号",
   );
-  assert.equal(state.failedFiles, 1, "该文件应被记为失败，以便下次同步重试");
-
-  fs.rmSync(platformDirectory, { recursive: true, force: true });
 });

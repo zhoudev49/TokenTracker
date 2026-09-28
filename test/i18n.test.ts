@@ -80,9 +80,12 @@ test("zh flatpickr locale", () => {
   assert.equal(loc!.firstDayOfWeek, 1);
 });
 
-test("en flatpickr locale is undefined (library default)", () => {
+test("en flatpickr locale is null so callers omit the key (library default)", () => {
+  // 回归：曾经返回 undefined，而调用方直接把它赋给 flatpickr 的 `locale` 配置 ——
+  // flatpickr 会把 undefined 当作一个「未知语言名」，每次英文页面加载都打印
+  // "flatpickr: invalid locale undefined"。改为返回 null，调用方据此**省略**该字段。
   const I18N = loadI18n({ browserLang: "en-US" });
-  assert.equal(I18N.flatpickrLocale(), undefined);
+  assert.equal(I18N.flatpickrLocale(), null);
 });
 
 test("zh and en dictionaries have identical key sets", () => {

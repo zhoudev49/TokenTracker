@@ -158,8 +158,11 @@
     // 自定义暗色浮层彻底消除原生白底弹层；若 CDN 未加载成功则回退原生控件，保证功能可用。
     // locale / altFormat 跟随界面语言：中文显示「2026年8月5日」，英文显示 2026-08-05；
     // 底层值始终为 Y-m-d 供后端。
+    // 英文时不传 locale：直接给 locale 赋 undefined 会被 flatpickr 当作
+    // 「未知语言名」并打印 "invalid locale undefined" 告警，省略该键才是内置英文默认。
+    const initialLocale = I18N.flatpickrLocale();
     const dateConfig: FlatpickrConfig = {
-      locale: I18N.flatpickrLocale(),
+      ...(initialLocale ? { locale: initialLocale } : {}),
       dateFormat: "Y-m-d",
       altInput: true,
       altFormat: I18N.getLang() === "zh" ? "Y年n月j日" : "Y-m-d",
@@ -194,7 +197,9 @@
       const clear = (id: string): void => {
         const wid = widgetInstances[id];
         if (wid && wid.type === "flatpickr") wid.api.clear(false);
-        else if (wid && wid.type === "tomselect") wid.api.setValue("", false);
+        // silent=true：清空动作由下方的 setSavedFilter + onChange 统一驱动，
+        // 不能让每个控件各自再派发一次 change（会打乱重置顺序，并重复请求数据）。
+        else if (wid && wid.type === "tomselect") wid.api.setValue("", true);
         else (filterEls as unknown as Record<string, HTMLSelectElement | HTMLInputElement>)[id].value = "";
       };
       clear("startDate"); clear("endDate"); clear("projectFilter"); clear("modelFilter"); clear("platformFilter");
@@ -209,6 +214,8 @@
       for (const id of ["startDate", "endDate"] as const) {
         const wid = widgetInstances[id];
         if (wid && wid.type === "flatpickr") {
+          // 切换回英文时传内置的 "default"（flatpickr 自带的英文 locale），
+          // 而不是 undefined —— 后者同样会触发 invalid locale 告警。
           wid.api.set("locale", I18N.flatpickrLocale() || "default");
           wid.api.set("altFormat", zh ? "Y年n月j日" : "Y-m-d");
           const alt = wid.api.altInput;
@@ -230,18 +237,36 @@
     populateSelect(filterEls.modelFilter, realModels, t("filter.allModels"));
   }
 
+  /**
+   * 判断某个值在控件里是否真实存在。
+   *
+   * TomSelect 只把**已选中**的选项同步回原生 <select>，其余选项只存在于它的内部
+   * store（`api.options`）里。因此原生 `el.options` 在 TomSelect 场景下几乎是空的
+   * （实测：加了 3 个选项后原生 select 仍是 0 个 option），用它做存在性判断会永远
+   * 返回 false —— 概览页点项目下钻（`sessions.html?projectName=X`）时参数被静默丢弃，
+   * 结果列出全部会话而不是该项目。
+   */
+  function hasOption(id: string, el: HTMLSelectElement, value: string): boolean {
+    const wid = widgetInstances[id];
+    if (wid && wid.type === "tomselect") {
+      return Object.prototype.hasOwnProperty.call(wid.api.options, value);
+    }
+    return Array.from(el.options).some((o) => o.value === value);
+  }
+
   function setFilterValue(id: string, value: string): boolean {
     const el = (filterEls as unknown as Record<string, HTMLSelectElement>)[id];
     if (!el || value == null) return false;
-    const match = Array.from(el.options).some((o) => o.value === value);
-    if (match) {
-      el.value = value;
-      const wid = widgetInstances[id];
-      if (wid && wid.type === "tomselect") wid.api.setValue(value, false);
-      else if (wid && wid.type === "flatpickr") wid.api.setDate(value || "", false);
-      return true;
-    }
-    return false;
+    if (!hasOption(id, el, value)) return false;
+    el.value = value;
+    const wid = widgetInstances[id];
+    // 第二个参数是 silent，必须传 true。传 false 会派发 change 事件，
+    // 而 populateSelect 是在控件绑定 onchange 之后才被调用的，于是这次程序化赋值会触发
+    // persistAndRun() → 把正在重建、尚未填好的控件状态写回 localStorage，
+    // 导致用户保存的筛选条件每次刷新页面都被清空。
+    if (wid && wid.type === "tomselect") wid.api.setValue(value, true);
+    else if (wid && wid.type === "flatpickr") wid.api.setDate(value || "", false);
+    return true;
   }
 
   function clearProjectFilter(): void {
@@ -251,7 +276,7 @@
     if (!el) return;
     el.value = "";
     const wid = widgetInstances.projectFilter;
-    if (wid && wid.type === "tomselect") wid.api.setValue("", false);
+    if (wid && wid.type === "tomselect") wid.api.setValue("", true);
   }
 
   function populateSelect(select: HTMLSelectElement, values: Array<string | { value: string; label: string }>, allLabel: string): void {
@@ -266,7 +291,9 @@
         else wid.api.addOption({ value: String(value), text: String(value) });
       }
       const match = (v: string | { value: string; label: string }): boolean => (v && typeof v === "object" ? v.value : String(v)) === current;
-      wid.api.setValue(values.some(match) ? current : "", false);
+      // silent=true：这里是程序化重建选项，绝不能触发 onchange（否则会把
+      // 尚未填好的状态写回 localStorage，覆盖用户保存的筛选条件）。
+      wid.api.setValue(values.some(match) ? current : "", true);
       return;
     }
     select.replaceChildren(new Option(allLabel, ""));
@@ -373,15 +400,25 @@
   function triggerSyncBackground(onChange?: (() => void) | null): Promise<void> { return runSync({ onComplete: onChange ? () => Promise.resolve(onChange()) : undefined, silent: true }); }
 
   // 生成一个带「序列令牌」的加载器：多次并发调用时，只有最后一次会真正渲染。
-  function makeLoader(renderFn: (...args: any[]) => Promise<any>): (...args: any[]) => Promise<any> {
+  /**
+   * 串行化并丢弃过期结果。
+   *
+   * 注意：`renderFn` 内部同时做了 fetch **和** 渲染，因此「完成后判断 seq」是没用的
+   * —— 过期的慢响应早已把 DOM 覆盖成旧数据了。这里把「是否仍是最新一次调用」
+   * 通过 `isCurrent` 传给 renderFn，让调用方在执行**渲染之前**自行检查。
+   * 同时仍保留 await 后的检查，用于丢弃过期调用产生的错误提示。
+   */
+  function makeLoader(renderFn: (isCurrent: () => boolean, ...args: any[]) => Promise<any>): (...args: any[]) => Promise<any> {
     let token = 0;
     return async function (...args: any[]): Promise<any> {
       const seq = ++token;
+      const isCurrent = (): boolean => seq === token;
       try {
-        const data = await renderFn.apply(null, args);
-        if (seq === token) return data;
+        const data = await renderFn.apply(null, [isCurrent, ...args]);
+        if (isCurrent()) return data;
       } catch (err) {
-        if (seq === token) { console.error(err); setConnection("error", t("status.connFailed")); showStatusI18n("status.loadFailed", [], true); }
+        // 过期调用的报错不应覆盖新调用的状态
+        if (isCurrent()) { console.error(err); setConnection("error", t("status.connFailed")); showStatusI18n("status.loadFailed", [], true); }
       }
     };
   }
