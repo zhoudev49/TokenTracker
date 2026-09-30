@@ -277,7 +277,7 @@ npm test    # 提交前请确保全绿
 
 ## 许可
 
-[ISC](./LICENSE) © 2026 zhoudev
+[ISC](./LICENSE) © 2026 zhoudev49
 
 <div align="center">
 <sub>如果这个项目对你有用，欢迎点个 ⭐️</sub>
