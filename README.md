@@ -16,7 +16,7 @@
 [![Privacy](https://img.shields.io/badge/privacy-100%25%20local-success?style=flat-square)](#数据与隐私)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](#贡献)
 
-<img src="./docs/screenshots/overview.png" alt="TokenTracker 概览页" width="900" />
+###### <img src="./docs/screenshots/overview.png" alt="TokenTracker 概览页" width="900" />
 
 </div>
 
@@ -71,7 +71,7 @@ TokenTracker 就是从这几条出发做的：**把本机已有的日志读出�
 需要 **Node.js 20.17+**（`sqlite3` 的原生模块要求）。
 
 ```bash
-git clone https://github.com/<your-name>/TokenTracker.git
+git clone https://github.com/zhoudev49/TokenTracker.git
 cd TokenTracker
 npm install
 npm start
@@ -280,9 +280,8 @@ npm test    # 提交前请确保全绿
 [ISC](./LICENSE) © 2026 zhoudev
 
 <div align="center">
-
 <sub>如果这个项目对你有用，欢迎点个 ⭐️</sub>
 
-<sub>🌏 中国大陆用户可访问 <a href="https://gitee.com/<your-name>/TokenTracker">Gitee 地址</a></sub>
+<sub>🌏 中国大陆用户可访问 <a href="https://gitee.com/zhoudev49/TokenTracker">Gitee 地址</a></sub>
 
 </div>

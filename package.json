@@ -15,7 +15,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/<your-name>/TokenTracker.git"
+    "url": "git+https://github.com/zhoudev49/TokenTracker.git"
   },
   "engines": {
     "node": ">=20.17.0"
