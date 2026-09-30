@@ -41,7 +41,7 @@
     "vibe-coding",
     "token-usage",
     "token-tracking",
-    "cost-estimation",
+    "token-counting",
     "sqlite",
     "dashboard",
     "privacy",
