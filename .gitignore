@@ -12,6 +12,8 @@ server.log
 *.log
 
 # ── 本地临时/调试文件 ──
+# 本机 npm 配置：可能含 _authToken，绝不提交
+.npmrc
 inspect_tmp.cjs
 push_before.md
 PUSH-GUIDE.md
