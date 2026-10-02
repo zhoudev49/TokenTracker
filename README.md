@@ -9,7 +9,8 @@
 不登录 · 不联网 · 不上传 · **只读**你的本地日志
 
 [![License](https://img.shields.io/badge/license-ISC-blue.svg?style=flat-square)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520.17-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
+[![npm](https://img.shields.io/npm/v/%40zhoudev49%2Ftokentracker?style=flat-square&logo=npm&color=CB3837)](https://www.npmjs.com/package/@zhoudev49/tokentracker)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Platforms](https://img.shields.io/badge/platforms-8-8A2BE2?style=flat-square)](#支持的平台)
 [![Dependencies](https://img.shields.io/badge/runtime%20deps-2-brightgreen?style=flat-square)](#技术栈)
@@ -104,6 +105,7 @@ npx @zhoudev49/tokentracker
 - 支持参数：`-p/--port <端口>`、`-h/--host <地址>`、`-d/--data-dir <路径>`；也支持 `PORT` / `HOST` / `TOKEN_TRACKER_DATA_DIR` 环境变量。
 - 全局安装后可省略 scope 前缀，直接执行 `tokentracker`：
   `npm install -g @zhoudev49/tokentracker` 后执行 `tokentracker`。
+- npm 包主页：<https://www.npmjs.com/package/@zhoudev49/tokentracker>
 
 > **中国大陆用户**：`npx` 会从 npm 官方源拉取。若首次下载较慢，可显式指定国内镜像
 > （镜像由 npm 官方定时同步，内容一致）：
