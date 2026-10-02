@@ -1,5 +1,5 @@
 {
-  "name": "tokentracker",
+  "name": "@zhoudev49/tokentracker",
   "version": "1.0.0",
   "description": "Privacy-first local token usage tracker for AI coding CLIs/IDEs (Claude Code, Codex, WorkBuddy, CodeBuddy, Qoder, Qwen, ZCode, OpenCode) — parses local session logs into SQLite and serves a token-focused web dashboard",
   "main": "dist/src/server.js",
@@ -63,5 +63,8 @@
     "concurrently": "^10.0.4",
     "nodemon": "^3.1.14",
     "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

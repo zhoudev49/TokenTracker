@@ -95,20 +95,21 @@ npm test           # 编译后运行全部单元测试
 不想 clone 仓库？已发布到 npm，用一行命令即可直接跑起来（首次会自动下载）：
 
 ```bash
-npx tokentracker
+npx @zhoudev49/tokentracker
 ```
 
 启动后访问 <http://127.0.0.1:3000> 即可。
 
 - 数据库默认落在 `~/.token-tracker`，不与 npm 缓存混在一起，重装不丢数据。
 - 支持参数：`-p/--port <端口>`、`-h/--host <地址>`、`-d/--data-dir <路径>`；也支持 `PORT` / `HOST` / `TOKEN_TRACKER_DATA_DIR` 环境变量。
-- 本地自托管同样可用：`npm install -g tokentracker` 后执行 `tokentracker`。
+- 全局安装后可省略 scope 前缀，直接执行 `tokentracker`：
+  `npm install -g @zhoudev49/tokentracker` 后执行 `tokentracker`。
 
 > **中国大陆用户**：`npx` 会从 npm 官方源拉取。若首次下载较慢，可显式指定国内镜像
 > （镜像由 npm 官方定时同步，内容一致）：
 >
 > ```bash
-> npx --registry=https://registry.npmmirror.com tokentracker
+> npx --registry=https://registry.npmmirror.com @zhoudev49/tokentracker
 > ```
 >
 > 已全局配置镜像的用户（`npm config set registry https://registry.npmmirror.com`）无需任何额外操作。

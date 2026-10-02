@@ -15,7 +15,8 @@ const os = require("os");
 const HELP = `TokenTracker — 本地 AI 编码工具 Token 用量仪表盘
 
 用法:
-  npx tokentracker [选项]
+  npx @zhoudev49/tokentracker [选项]
+  tokentracker [选项]
 
 选项:
   -p, --port <端口>       监听端口 (默认 3000)
