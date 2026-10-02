@@ -7,8 +7,11 @@
     "tokentracker": "bin/tokentracker.js"
   },
   "files": [
-    "dist",
-    "public",
+    "dist/src",
+    "public/*.js",
+    "public/*.html",
+    "public/*.css",
+    "public/vendor",
     "bin",
     "README.md",
     "LICENSE"
